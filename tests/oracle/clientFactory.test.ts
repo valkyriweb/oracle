@@ -109,9 +109,19 @@ describe("createDefaultClientFactory", () => {
     expect(client).toMatchObject({ client: "claude", model: "claude-4.6-sonnet" });
   });
 
-  test("routes claude custom base URLs through the chat/completions adapter", async () => {
+  // FORK(valkyriweb): upstream routes claude+custom-baseURL through the OpenAI
+  // chat/completions adapter. The fork keeps claude on the native Anthropic Messages
+  // client for ANY base URL so a local Anthropic-protocol proxy (claude-bridge at
+  // 127.0.0.1:9100, serving /v1/messages) is reachable. See UPSTREAM.md.
+  test("FORK: routes claude custom base URLs through the native Anthropic client", async () => {
     process.env.ORACLE_CLIENT_FACTORY = "";
-    const createClaudeClient = vi.fn();
+    const createClaudeClient = vi.fn((key, model, resolvedModelId, baseUrl) => ({
+      client: "claude",
+      key,
+      model,
+      resolvedModelId,
+      baseUrl,
+    }));
     vi.doMock("../../src/oracle/claude.js", () => ({ createClaudeClient }));
 
     const { createDefaultClientFactory } = await import("../../src/oracle/client.js");
@@ -119,14 +129,18 @@ describe("createDefaultClientFactory", () => {
     const client = factory("xyz", {
       model: "claude-4.6-sonnet",
       resolvedModelId: "claude-sonnet",
-      baseUrl: "https://litellm.test/v1",
+      baseUrl: "http://127.0.0.1:9100/v1/messages",
     });
 
-    expect(createClaudeClient).not.toHaveBeenCalled();
-    expect(client.responses).toMatchObject({
-      create: expect.any(Function),
-      stream: expect.any(Function),
-      retrieve: expect.any(Function),
+    expect(createClaudeClient).toHaveBeenCalledWith(
+      "xyz",
+      "claude-4.6-sonnet",
+      "claude-sonnet",
+      "http://127.0.0.1:9100/v1/messages",
+    );
+    expect(client).toMatchObject({
+      client: "claude",
+      baseUrl: "http://127.0.0.1:9100/v1/messages",
     });
   });
 
