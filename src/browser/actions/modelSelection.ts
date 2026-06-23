@@ -28,7 +28,11 @@ type ModelSelectionResult =
 // Re-evaluate while it is still missing, up to a bounded deadline, so selection does not
 // give up before the pill renders. Only "button-missing" waits; a genuine
 // "option-not-found" surfaces immediately.
-const MODEL_BUTTON_WAIT_MS = 8000;
+// FORK(valkyriweb): widened from upstream's 8000ms. The composer pill has been observed
+// mounting ~14s after the textarea becomes interactive under load / large prompts on Pro;
+// 8s lost the race. Zero cost on the happy path (the poll loop exits as soon as the pill
+// renders). See UPSTREAM.md.
+const MODEL_BUTTON_WAIT_MS = 20000;
 const MODEL_BUTTON_POLL_MS = 250;
 
 export async function ensureModelSelection(
