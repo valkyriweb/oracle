@@ -42,6 +42,12 @@ Each bullet = one local commit on top of `upstream/main`.
   prompts on Pro). Widened `MODEL_BUTTON_WAIT_MS` to 20000. Zero cost on the
   happy path — the loop exits the instant the pill renders.
 
+- **`fix(claude): double Claude max_tokens 2048 → 4096.**
+  `src/oracle/claude.ts` — the Anthropic Messages API requires `max_tokens`, and
+  upstream hardcodes a low 2048, silently truncating longer Claude answers
+  (`stop_reason: max_tokens`). Doubled to 4096. Still hardcoded (not yet wired to
+  a flag/config).
+
 ## Refresh from upstream
 
 ```bash

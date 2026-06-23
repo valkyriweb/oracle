@@ -34,7 +34,10 @@ async function callClaude({
   const url = endpoint?.trim() || DEFAULT_CLAUDE_ENDPOINT;
   const payload: Record<string, unknown> = {
     model,
-    max_tokens: 2048,
+    // FORK(valkyriweb): doubled from upstream's 2048. Anthropic requires max_tokens,
+    // and 2048 silently truncated longer Claude answers (stop_reason: max_tokens).
+    // See UPSTREAM.md.
+    max_tokens: 4096,
     messages: [
       {
         role: "user",
