@@ -41,6 +41,15 @@ export function createDefaultClientFactory(): ClientFactory {
     const openRouter = isOpenRouterBaseUrl(options?.baseUrl);
     const customProxy = isCustomBaseUrl(options?.baseUrl);
 
+    // FORK(valkyriweb): Claude always uses the native Anthropic Messages client, even with
+    // a custom base URL (e.g. a local Anthropic-protocol proxy such as claude-bridge at
+    // 127.0.0.1:9100). Such a proxy speaks Anthropic /v1/messages, NOT OpenAI
+    // chat/completions, so the "custom base URL => OpenAI adapter" rule below would send
+    // Claude to /v1/responses and 404. See UPSTREAM.md.
+    if (options?.model?.startsWith("claude")) {
+      return createClaudeClient(key, options.model, options.resolvedModelId, options.baseUrl);
+    }
+
     // When using any custom/proxy base URL (OpenRouter, LiteLLM, vLLM, Together, etc.),
     // route ALL models through the OpenAI chat/completions adapter instead of native SDKs
     // which would reject the proxy's API key.
@@ -48,9 +57,6 @@ export function createDefaultClientFactory(): ClientFactory {
       if (options?.model?.startsWith("gemini")) {
         // Gemini client uses its own SDK; allow passing the already-resolved id for transparency/logging.
         return createGeminiClient(key, options.model, options.resolvedModelId);
-      }
-      if (options?.model?.startsWith("claude")) {
-        return createClaudeClient(key, options.model, options.resolvedModelId, options.baseUrl);
       }
     }
 
