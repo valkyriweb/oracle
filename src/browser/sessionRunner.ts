@@ -54,6 +54,8 @@ export interface BrowserSessionRunnerDeps {
 
 const LARGE_PRO_FAST_INPUT_TOKEN_THRESHOLD = 25_000;
 const LARGE_PRO_FAST_ELAPSED_MS_THRESHOLD = 120_000;
+const SUSPICIOUS_TINY_BROWSER_ANSWER_INPUT_TOKEN_THRESHOLD = 1_000;
+const SUSPICIOUS_TINY_BROWSER_ANSWER_CHAR_THRESHOLD = 2;
 
 function buildUnavailableModelSelectionEvidence(
   browserConfig: BrowserSessionConfig,
@@ -252,12 +254,29 @@ export async function runBrowserSessionExecution(
   for (const warning of warnings) {
     log(chalk.yellow(`[browser] ${warning.message}`));
   }
+  const answerText = browserResult.answerMarkdown || browserResult.answerText || "";
+  const trimmedAnswerText = answerText.trim();
+  if (
+    promptArtifacts.estimatedInputTokens >= SUSPICIOUS_TINY_BROWSER_ANSWER_INPUT_TOKEN_THRESHOLD &&
+    trimmedAnswerText.length > 0 &&
+    trimmedAnswerText.length <= SUSPICIOUS_TINY_BROWSER_ANSWER_CHAR_THRESHOLD
+  ) {
+    throw new BrowserAutomationError(
+      `Browser capture produced a suspiciously tiny answer (${JSON.stringify(trimmedAnswerText)}) for a non-trivial prompt; leaving the ChatGPT conversation available for reattach instead of marking the session complete.`,
+      {
+        stage: "browser-answer-validation",
+        inputTokens: promptArtifacts.estimatedInputTokens,
+        answerChars: trimmedAnswerText.length,
+        tabUrl: browserResult.tabUrl,
+        conversationId: browserResult.conversationId,
+      },
+    );
+  }
   if (!runOptions.silent) {
     log(chalk.bold("Answer:"));
-    log(browserResult.answerMarkdown || browserResult.answerText || chalk.dim("(no text output)"));
+    log(answerText || chalk.dim("(no text output)"));
     log("");
   }
-  const answerText = browserResult.answerMarkdown || browserResult.answerText || "";
   const savedArtifacts = await ensureSessionArtifacts({
     sessionId: runOptions.sessionId,
     prompt: promptArtifacts.composerText,
