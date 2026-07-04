@@ -74,6 +74,43 @@ describe("runBrowserSessionExecution", () => {
     expect(log).toHaveBeenCalled();
   });
 
+  test("rejects suspicious one-character browser captures for non-trivial prompts", async () => {
+    const executeBrowser = vi.fn(async () => ({
+      answerText: "I",
+      answerMarkdown: "I",
+      tookMs: 404_000,
+      answerTokens: 1,
+      answerChars: 1,
+      tabUrl: "https://chatgpt.com/c/bad-capture",
+      conversationId: "bad-capture",
+    }));
+
+    await expect(
+      runBrowserSessionExecution(
+        {
+          runOptions: baseRunOptions,
+          browserConfig: baseConfig,
+          cwd: "/repo",
+          log: vi.fn(),
+        },
+        {
+          assemblePrompt: async () => ({
+            markdown: "prompt",
+            composerText: "prompt",
+            estimatedInputTokens: 15_438,
+            attachments: [],
+            inlineFileCount: 0,
+            tokenEstimateIncludesInlineFiles: false,
+            attachmentsPolicy: "auto",
+            attachmentMode: "inline",
+            fallback: null,
+          }),
+          executeBrowser,
+        },
+      ),
+    ).rejects.toThrow(/suspiciously tiny answer/);
+  });
+
   test("passes browser resume conversation URL to executeBrowser", async () => {
     const executeBrowser = vi.fn(async () => ({
       answerText: "ok",
