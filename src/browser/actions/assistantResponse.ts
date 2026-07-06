@@ -18,6 +18,22 @@ import { buildClickDispatcher } from "./domEvents.js";
 
 const ASSISTANT_POLL_TIMEOUT_ERROR = "assistant-response-watchdog-timeout";
 const STOP_CONTROL_SELECTOR = STOP_BUTTON_SELECTORS.join(", ");
+const MIN_CONFIDENT_ANSWER_LENGTH = 16;
+
+function isImplausiblyShortAnswer(candidateLength: number): boolean {
+  return candidateLength > 0 && candidateLength < MIN_CONFIDENT_ANSWER_LENGTH;
+}
+
+export function shouldConfirmAssistantCompletion(args: {
+  candidateLength: number;
+  stopVisible: boolean;
+  completionVisible: boolean;
+}): boolean {
+  if (args.stopVisible || args.completionVisible) {
+    return true;
+  }
+  return isImplausiblyShortAnswer(args.candidateLength);
+}
 const THINKING_STATUS_LABELS = [
   "thinking",
   "pro thinking",
@@ -158,7 +174,9 @@ export async function waitForAssistantResponse(
         error instanceof Error &&
         error.message === ASSISTANT_POLL_TIMEOUT_ERROR
       ) {
-        evaluation = await evaluationPromise;
+        evaluationPromise.catch(() => undefined);
+        await terminateRuntimeExecution(Runtime);
+        throw error;
       } else if (source === "poll") {
         throw error;
       } else if (source === "evaluation") {
@@ -229,6 +247,8 @@ export async function waitForAssistantResponse(
   // The evaluation path can race ahead of completion. If ChatGPT is still streaming, wait for the watchdog poller.
   const elapsedMs = Date.now() - start;
   const remainingMs = Math.max(0, timeoutMs - elapsedMs);
+  const candidateText = String(candidate?.text ?? "").trim();
+  const suspiciouslyShort = isImplausiblyShortAnswer(candidateText.length);
   if (remainingMs > 0) {
     const [stopVisible, completionVisible] = await Promise.all([
       isStopButtonVisible(Runtime),
@@ -237,12 +257,19 @@ export async function waitForAssistantResponse(
     // Completion controls can appear briefly while Pro is still replacing its thinking UI.
     // Confirm every capture from that transition with the stability-based watchdog; a
     // partial first paragraph can be arbitrarily long.
-    const candidateText = String(candidate?.text ?? "").trim();
-    if (stopVisible || completionVisible) {
+    if (
+      shouldConfirmAssistantCompletion({
+        candidateLength: candidateText.length,
+        stopVisible,
+        completionVisible,
+      })
+    ) {
       logger(
         stopVisible
           ? "Assistant still generating; waiting for completion"
-          : "Completion controls surfaced; confirming stable assistant response",
+          : completionVisible
+            ? "Completion controls surfaced; confirming stable assistant response"
+            : "Captured an implausibly short response; confirming it is not a mid-stream capture",
       );
       const completed = await pollAssistantCompletion(
         Runtime,
@@ -254,6 +281,12 @@ export async function waitForAssistantResponse(
         return completed;
       }
     }
+  }
+
+  if (suspiciouslyShort) {
+    throw new Error(
+      "assistant-response short capture could not be confirmed before timeout; refusing to finalize it",
+    );
   }
 
   return candidate;
@@ -349,6 +382,7 @@ async function recoverAssistantResponse(
   if (recoveryTimeoutMs === 0) {
     return null;
   }
+  const recoveryStartedAt = Date.now();
   const recovered = await waitForCondition(
     async () => {
       const snapshot = await readAssistantSnapshot(Runtime, minTurnIndex, expectedConversationId);
@@ -358,6 +392,11 @@ async function recoverAssistantResponse(
     400,
   );
   if (recovered) {
+    if (isImplausiblyShortAnswer(recovered.text.length)) {
+      logger("Recovered an implausibly short response; waiting for completion proof");
+      const remainingMs = Math.max(0, recoveryTimeoutMs - (Date.now() - recoveryStartedAt));
+      return pollAssistantCompletion(Runtime, remainingMs, minTurnIndex, expectedConversationId);
+    }
     logger("Recovered assistant response via polling fallback");
     return recovered;
   }
@@ -523,8 +562,8 @@ async function pollAssistantCompletion(
       if (isGeneratedImageAssistantAnswer(normalized)) {
         return normalized;
       }
-      const shortAnswer = currentLength > 0 && currentLength < 16;
-      const mediumAnswer = currentLength >= 16 && currentLength < 40;
+      const shortAnswer = isImplausiblyShortAnswer(currentLength);
+      const mediumAnswer = currentLength >= MIN_CONFIDENT_ANSWER_LENGTH && currentLength < 40;
       const longAnswer = currentLength >= 40 && currentLength < 500;
       // Learned: short answers need a longer stability window or they truncate.
       // Learned: long streaming responses (esp. thinking models) can pause mid-stream;
@@ -538,7 +577,7 @@ async function pollAssistantCompletion(
         const stableEnough = stableCycles >= requiredStableCycles && stableMs >= minStableMs;
         const completionEnough =
           completionVisible && stableCycles >= completionStableTarget && stableMs >= minStableMs;
-        if (completionEnough || stableEnough) {
+        if (completionEnough || (!shortAnswer && stableEnough)) {
           return normalized;
         }
       }
@@ -901,8 +940,8 @@ function buildResponseObserverExpression(
       // Learned: long streaming responses (esp. thinking models) can pause mid-stream;
       // use progressively longer windows to avoid truncation (#71).
       const initialLength = snapshot?.text?.length ?? 0;
-      const shortAnswer = initialLength > 0 && initialLength < 16;
-      const mediumAnswer = initialLength >= 16 && initialLength < 40;
+      const shortAnswer = initialLength > 0 && initialLength < ${MIN_CONFIDENT_ANSWER_LENGTH};
+      const mediumAnswer = initialLength >= ${MIN_CONFIDENT_ANSWER_LENGTH} && initialLength < 40;
       const longAnswer = initialLength >= 40 && initialLength < 500;
       const settleWindowMs = shortAnswer ? 12_000 : mediumAnswer ? 5_000 : longAnswer ? 8_000 : 10_000;
       const settleIntervalMs = 400;
