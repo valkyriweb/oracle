@@ -235,6 +235,19 @@ describe("isDeepResearchPlaceholderCapture", () => {
       "The findings show that the market grew 12% year over year.\n";
     expect(isDeepResearchPlaceholderCapture(deepResearchMeta, log)).toBe(false);
   });
+
+  test("does not re-flag a wrapper capture that was already recovered", () => {
+    const log =
+      "Answer:\n" +
+      "Called tool\n" +
+      "Deep Research App\n" +
+      "Response { session_id: abc123 }\n" +
+      "[reattach] captured assistant response from existing Chrome tab\n" +
+      "Answer:\n" +
+      "# Research Report\n" +
+      "The recovered findings.\n";
+    expect(isDeepResearchPlaceholderCapture(deepResearchMeta, log)).toBe(false);
+  });
 });
 
 describe("attachSession rendering", () => {

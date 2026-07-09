@@ -85,7 +85,17 @@ export function isDeepResearchPlaceholderCapture(
   // ("Called tool / Deep Research App / ... Response { session_id: ... }"). The wrapper
   // is longer than the old outputTokens<=8 gate allowed, so match structurally on the
   // leading marker instead of by exact text and token count.
-  return DEEP_RESEARCH_TOOL_CALL_MARKERS.some((marker) => answer.startsWith(marker));
+  if (!DEEP_RESEARCH_TOOL_CALL_MARKERS.some((marker) => answer.startsWith(marker))) {
+    return false;
+  }
+  // A reattach appends a recovered "[reattach] ... Answer: <report>" section after the
+  // stale placeholder. trimBeforeFirstAnswer only skips the bare-stub form of that
+  // wrapper, so for the multi-line wrapper the leading placeholder still surfaces here.
+  // If a later Answer already exists the session is recovered; don't re-flag it as a
+  // placeholder and re-trigger reattach over the completed result.
+  const firstAnswer = logText.indexOf("Answer:");
+  const lastAnswer = logText.lastIndexOf("Answer:");
+  return lastAnswer <= firstAnswer;
 }
 
 async function writeReattachAnswer(
