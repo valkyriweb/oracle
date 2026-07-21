@@ -119,8 +119,7 @@ function assertResolvedModelSelection(desiredModel: string, resolvedLabel: strin
     const resolvedTokens = normalizedResolved.split(" ");
     if (
       !/(?:^| )5 6(?: |$)/.test(normalizedResolved) ||
-      !resolvedTokens.includes("sol") ||
-      resolvedTokens.includes("pro")
+      !resolvedTokens.includes("sol")
     ) {
       throw new Error(
         `Model picker selected "${resolvedLabel}" while "${desiredModel}" requires GPT-5.6 Sol.`,
@@ -444,7 +443,6 @@ function buildModelSelectionExpression(
         !configuredVersionLabel.includes(desiredModelVariant) &&
         !configuredVariant.includes(desiredModelVariant)
       ) return false;
-      if (desiredModelVariant === 'sol' && labelHasProWord(configuredVariant)) return false;
       if (wantsPro) return labelHasProWord(configuredVariant);
       if (wantsInstant) return configuredVariant.includes('instant');
       if (wantsThinking) {
@@ -510,7 +508,6 @@ function buildModelSelectionExpression(
       if (configuredSelectionMatchesTarget()) return true;
       const normalizedLabel = normalizeText(getButtonLabel());
       if (!normalizedLabel) return false;
-      if (desiredModelVariant === 'sol' && hasProComposerPill()) return false;
       if (wantsThinking && !wantsPro && hasProComposerPill()) return false;
       if (isTargetGpt55VisibleAlias(normalizedLabel)) return true;
       if (
@@ -557,7 +554,7 @@ function buildModelSelectionExpression(
       }
       if (wantsThinking && !normalizedLabel.includes('thinking')) return false;
       // Also reject if button has variants we DON'T want
-      if (!wantsPro && normalizedLabel.includes(' pro')) return false;
+      if (!wantsPro && desiredModelVariant !== 'sol' && normalizedLabel.includes(' pro')) return false;
       if (!wantsInstant && normalizedLabel.includes('instant')) return false;
       if (!wantsThinking && normalizedLabel.includes('thinking')) return false;
       return true;
@@ -570,9 +567,6 @@ function buildModelSelectionExpression(
       const signal = readComposerModelSignal();
       if (!signal) {
         return COMPOSER_SIGNAL_ALLOW_BLANK;
-      }
-      if (desiredModelVariant === 'sol' && hasProComposerPill()) {
-        return false;
       }
       if (wantsPro && labelHasLegacyProVersion(signal)) {
         return false;
@@ -968,6 +962,7 @@ function buildModelSelectionExpression(
         text.includes('instant') ||
         text.includes('thinking') ||
         labelHasProWord(text) ||
+        text.includes('5 6') ||
         text.includes('5 5') ||
         text.includes('5 4') ||
         text.includes('5 2') ||
@@ -1001,7 +996,7 @@ function buildModelSelectionExpression(
         desiredModelVariant === 'sol' &&
         (labelHasProWord(normalizedText) || normalizeText(testid ?? '').includes('pro'))
       ) return false;
-      if (desiredVersion === '5-6') return !hasProComposerPill();
+      if (desiredVersion === '5-6') return true;
       const currentButtonLabel = normalizeText(getButtonLabel());
       return !labelHasProWord(currentButtonLabel) && !hasProComposerPill();
     };
@@ -1222,7 +1217,7 @@ function buildComposerSignalMatchers(targetModel: string): ComposerSignalMatcher
     .trim();
 
   if (normalized.includes("5 6")) {
-    return { includesAny: ["5 6 sol"], excludesAny: ["pro"], allowBlank: false };
+    return { includesAny: ["5 6 sol"], excludesAny: [], allowBlank: false };
   }
   if (normalized.includes("pro")) {
     return { includesAny: ["pro"], excludesAny: ["thinking"], allowBlank: false };
