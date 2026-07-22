@@ -947,10 +947,10 @@ describe("browser model selection matchers", () => {
     expect(testIdTokens).toContain("gpt56");
   });
 
-  it("requires an explicit GPT-5.6 composer signal", () => {
+  it("requires an explicit GPT-5.6 composer signal while allowing independent effort labels", () => {
     expect(buildComposerSignalMatchersForTest("GPT-5.6 Sol")).toEqual({
       includesAny: ["5 6 sol"],
-      excludesAny: ["pro"],
+      excludesAny: [],
       allowBlank: false,
     });
   });
@@ -978,6 +978,12 @@ describe("browser model selection matchers", () => {
     ).resolves.toEqual({ status: "already-selected", label: "GPT-5.6 Sol" });
   });
 
+  it("accepts GPT-5.6 Sol as selected while the independent Intelligence pill is Pro", async () => {
+    await expect(
+      evaluateIntelligenceModelSelectionExpression("GPT-5.6 Sol", "Pro Extended", true, true),
+    ).resolves.toEqual({ status: "already-selected", label: "GPT-5.6 Sol" });
+  });
+
   it("verifies a GPT-5.6 Sol switch when the localized effort pill stays unchanged", async () => {
     await expect(
       evaluateIntelligenceModelSelectionExpression("GPT-5.6 Sol", "极速", true, true, "5.5", true),
@@ -989,9 +995,9 @@ describe("browser model selection matchers", () => {
     expect(result).toBeInstanceOf(Promise);
   });
 
-  it("keeps base Sol distinct from the Pro target", () => {
+  it("treats Pro as an independent Intelligence effort for GPT-5.6 Sol", () => {
     const inlinePro = evaluateImmediateModelSelectionExpression("GPT-5.6 Sol", "GPT-5.6 Sol Pro");
-    expect(inlinePro).toBeInstanceOf(Promise);
+    expect(inlinePro).toEqual({ status: "already-selected", label: "GPT-5.6 Sol Pro" });
 
     const separateProPill = evaluateImmediateModelSelectionExpression(
       "GPT-5.6 Sol",
@@ -999,7 +1005,7 @@ describe("browser model selection matchers", () => {
       "5.6 Sol",
       "Pro",
     );
-    expect(separateProPill).toBeInstanceOf(Promise);
+    expect(separateProPill).toEqual({ status: "already-selected", label: "5.6 Sol" });
   });
 
   it("includes real pointer coordinates when opening version submenus", () => {
@@ -1371,9 +1377,7 @@ describe("browser model selection matchers", () => {
     expect(() => assertResolvedModelSelectionForTest("gpt-5.6-sol", "GPT-5.6 Luna")).toThrow(
       /requires GPT-5\.6 Sol/,
     );
-    expect(() => assertResolvedModelSelectionForTest("gpt-5.6-sol", "GPT-5.6 Sol Pro")).toThrow(
-      /requires GPT-5\.6 Sol/,
-    );
+    expect(() => assertResolvedModelSelectionForTest("gpt-5.6-sol", "GPT-5.6 Sol Pro")).not.toThrow();
     expect(() => assertResolvedModelSelectionForTest("gpt-5.6-sol", "GPT-5.6 Sol")).not.toThrow();
   });
 
