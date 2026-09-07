@@ -164,7 +164,7 @@ export function parseThinkingTimeOption(value: string): ThinkingTimeLevel {
     return normalized;
   }
   throw new InvalidArgumentError(
-    'Thinking time must be one of "light", "standard", "extended", "heavy", or a ChatGPT UI alias like "instant", "medium", "high", or "extra-high".',
+    'Thinking time must be one of "light", "standard", "extended", "extra-high", "pro", "heavy", or a ChatGPT UI alias like "instant", "medium", "high", or "xhigh".',
   );
 }
 
@@ -227,6 +227,12 @@ export function resolveApiModel(modelValue: string): ModelName {
   }
   if (normalized.includes("/")) {
     return normalized as ModelName;
+  }
+  const gpt56Label = parseBrowserGpt56Label(normalized);
+  if (gpt56Label?.variant.split(" ").includes("pro")) {
+    throw new InvalidArgumentError(
+      "GPT-5.6 Pro is an API reasoning mode, not a model slug. Use --model gpt-5.6-sol --reasoning-mode pro.",
+    );
   }
   if (normalized.includes("grok")) {
     return "grok-4.1";

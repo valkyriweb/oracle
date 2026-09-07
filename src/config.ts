@@ -19,6 +19,7 @@ export interface NotifyConfig {
 }
 
 export interface BrowserConfigDefaults {
+  remoteChrome?: { host: string; port: number } | null;
   chromeProfile?: string | null;
   chromePath?: string | null;
   chromeCookiePath?: string | null;
@@ -52,6 +53,8 @@ export interface BrowserConfigDefaults {
   autoReattachIntervalMs?: number;
   /** Time budget for each auto-reattach attempt. */
   autoReattachTimeoutMs?: number;
+  /** Copy cookies from a live Chrome profile into temporary automation profiles. */
+  cookieSync?: boolean;
   cookieSyncWaitMs?: number;
   headless?: boolean;
   hideWindow?: boolean;
@@ -67,6 +70,8 @@ export interface BrowserConfigDefaults {
   manualLogin?: boolean;
   /** Manual-login profile directory override (also available via ORACLE_BROWSER_PROFILE_DIR). */
   manualLoginProfileDir?: string | null;
+  /** Seed a manual-login profile from configured Chrome/inline cookies. */
+  manualLoginCookieSync?: boolean;
 }
 
 export interface AzureConfig {

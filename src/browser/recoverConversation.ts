@@ -106,8 +106,10 @@ export function isRecoveredConversationHarvestReady(harvested: {
     (typeof harvested.lastAssistantTurnIndex === "number" &&
       typeof harvested.lastUserTurnIndex === "number" &&
       harvested.lastAssistantTurnIndex > harvested.lastUserTurnIndex);
+  const hasHydratedUserTurn =
+    typeof harvested.lastUserTurnIndex === "number" && harvested.lastUserTurnIndex >= 0;
   return (
-    harvested.stopExists === true ||
+    (harvested.stopExists === true && hasHydratedUserTurn) ||
     ((harvested.assistantCount ?? 0) > 0 &&
       assistantFollowsLatestUser &&
       latestAssistant.trim().length > 0 &&

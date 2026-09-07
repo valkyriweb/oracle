@@ -1,15 +1,8 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import type { OptionValues } from "commander";
-// Allow `npx @steipete/oracle oracle-mcp` to resolve the MCP server even though npx runs the default binary.
-if (process.argv[2] === "oracle-mcp") {
-  const { startMcpServer } = await import("../src/mcp/server.js");
-  await startMcpServer();
-  process.exit(0);
-}
 import { resolveEngine, type EngineMode, defaultWaitPreference } from "../src/cli/engine.js";
 import { shouldRequirePrompt } from "../src/cli/promptRequirement.js";
 import { resolveDashPrompt } from "../src/cli/stdin.js";
@@ -23,6 +16,8 @@ import type {
   ModelName,
   ModelOverridesConfig,
   PreviewMode,
+  ReasoningEffort,
+  ReasoningMode,
   RunOracleOptions,
 } from "../src/oracle/types.js";
 import { CHATGPT_URL } from "../src/browser/constants.js";
@@ -50,6 +45,7 @@ import {
 import { copyToClipboard } from "../src/cli/clipboard.js";
 import { buildMarkdownBundle } from "../src/cli/markdownBundle.js";
 import { shouldDetachSession, stopDetachedWorker } from "../src/cli/detach.js";
+import { launchDetachedSession } from "../src/cli/detachedSession.js";
 import { applyHiddenAliases } from "../src/cli/hiddenAliases.js";
 import type { BrowserSessionRunnerDeps } from "../src/browser/sessionRunner.js";
 import { isMediaFile } from "../src/browser/prompt.js";
@@ -96,6 +92,8 @@ interface CliOptions extends OptionValues {
   render?: boolean;
   model: string;
   models?: string[];
+  reasoningEffort?: ReasoningEffort;
+  reasoningMode?: ReasoningMode;
   force?: boolean;
   slug?: string;
   filesReport?: boolean;
@@ -134,6 +132,7 @@ interface CliOptions extends OptionValues {
   browserProfileLockTimeout?: string;
   browserMaxConcurrentTabs?: string;
   browserCookieWait?: string;
+  browserCookieSync?: boolean;
   browserNoCookieSync?: boolean;
   browserInlineCookiesFile?: string;
   browserCookieNames?: string;
@@ -146,7 +145,7 @@ interface CliOptions extends OptionValues {
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string;
   copyProfile?: string;
-  browserThinkingTime?: "light" | "standard" | "extended" | "heavy";
+  browserThinkingTime?: "light" | "standard" | "extended" | "extra-high" | "pro" | "heavy";
   browserResearch?: "off" | "deep";
   browserFollowUp?: string[];
   browserAllowCookieErrors?: boolean;
@@ -165,6 +164,7 @@ interface CliOptions extends OptionValues {
   output?: string;
   aspect?: string;
   geminiShowThoughts?: boolean;
+  geminiFallback?: boolean;
   copyMarkdown?: boolean;
   copy?: boolean;
   verbose?: boolean;
@@ -435,7 +435,7 @@ program
   .option("-s, --slug <words>", "Custom session slug (3-5 words).")
   .option(
     "-m, --model <model>",
-    'Model to target (gpt-5.5-pro default). GPT-5.6 aliases: gpt-5.6 and gpt-5.6-sol (OpenAI API or ChatGPT browser). Also gpt-5.5, gpt-5.4-pro, gpt-5.4, gpt-5.1-pro, gpt-5-pro, gpt-5.1, gpt-5.1-codex API-only, gpt-5.2, gpt-5.2-instant, gpt-5.2-pro, gemini-3.1-flash-lite, gemini-3.5-flash, gemini-3.1-pro, legacy gemini-3-pro, claude-4.6-sonnet, claude-4.1-opus, or ChatGPT labels like "5.5 Pro" / "5.2 Thinking" for browser runs).',
+    "Model to target (gpt-5.5-pro default). GPT-5.6 aliases gpt-5.6 and gpt-5.6-sol work with the OpenAI API or ChatGPT browser. In browser mode, generic Pro aliases follow the current GPT-5.6 Sol target; use explicit gpt-5.5-pro to pin GPT-5.5. Retired GPT-5.2 base/Instant/Thinking aliases are API-only. Other API targets include gpt-5.1-codex, gpt-5.2, gpt-5.2-instant, Gemini, Claude, and custom model IDs.",
     normalizeModelOption,
   )
   .addOption(
@@ -445,6 +445,22 @@ program
     )
       .argParser(collectModelList)
       .default([]),
+  )
+  .addOption(
+    new Option("--reasoning-effort <effort>", "Reasoning effort for GPT-5.6 API models.").choices([
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]),
+  )
+  .addOption(
+    new Option(
+      "--reasoning-mode <mode>",
+      'Responses API reasoning execution mode for GPT-5.6 models ("standard" or "pro").',
+    ).choices(["standard", "pro"]),
   )
   .addOption(
     new Option(
@@ -743,6 +759,12 @@ program
       "Load inline cookies from file (JSON or base64 JSON).",
     ).hideHelp(),
   )
+  .addOption(
+    new Option(
+      "--browser-cookie-sync",
+      "Copy cookies from live Chrome (opt-in; token rotation may invalidate that session).",
+    ),
+  )
   .addOption(new Option("--browser-no-cookie-sync", "Skip copying cookies from Chrome.").hideHelp())
   .addOption(
     new Option(
@@ -781,7 +803,7 @@ program
   .addOption(
     new Option(
       "--browser-thinking-time <level>",
-      "Thinking time intensity for Thinking/Pro models: light, standard, extended, heavy, or ChatGPT UI aliases.",
+      "Thinking time intensity for Thinking/Pro models: light, standard, extended, extra-high (Extra High), pro (Pro tier of the active model), heavy, or ChatGPT UI aliases.",
     )
       .argParser(parseThinkingTimeOption)
       .hideHelp(),
@@ -848,13 +870,13 @@ program
   .addOption(
     new Option(
       "--browser-bundle-files",
-      "Bundle all attachments into a single archive before uploading.",
+      "Force one browser upload bundle; auto/zip includes all resolved files. Multi-file text/source uploads already bundle by default (flattened text unless ZIP is selected).",
     ).default(false),
   )
   .addOption(
     new Option(
       "--browser-bundle-format <format>",
-      "Bundle format for browser uploads when files are bundled: auto (default), text, or zip.",
+      "Bundle format for browser uploads: auto (flattened text for text-only, ZIP when raw files are present), text, or zip.",
     )
       .choices(["auto", "text", "zip"])
       .default("auto"),
@@ -889,6 +911,10 @@ program
       "--gemini-show-thoughts",
       "Display Gemini thinking process (Gemini web/cookie mode only).",
     ).default(false),
+  )
+  .option(
+    "--no-gemini-fallback",
+    "Fail if the requested Gemini web model is unavailable instead of using Flash-Lite.",
   )
   .option(
     "--retain-hours <hours>",
@@ -942,6 +968,11 @@ program
     "--manual-login-profile-dir <path>",
     "Chrome profile directory for manual login (default ~/.oracle/browser-profile).",
   )
+  .option(
+    "--browser-cookie-sync",
+    "Copy cookies from this host's live Chrome profile instead of using the dedicated profile.",
+    false,
+  )
   .action(async (commandOptions) => {
     const { serveRemote } = await import("../src/remote/server.js");
     await serveRemote({
@@ -950,6 +981,7 @@ program
       token: commandOptions.token,
       manualLoginDefault: commandOptions.manualLogin,
       manualLoginProfileDir: commandOptions.manualLoginProfileDir,
+      cookieSyncDefault: commandOptions.browserCookieSync,
     });
   });
 
@@ -980,6 +1012,10 @@ function addProjectSourcesCommonOptions(command: Command): Command {
     .option("--browser-cookie-path <path>", "Explicit Chrome cookie DB path.")
     .option("--browser-inline-cookies <json>", "Inline ChatGPT cookies JSON.")
     .option("--browser-inline-cookies-file <path>", "File containing ChatGPT cookies JSON.")
+    .option(
+      "--browser-cookie-sync",
+      "Copy cookies from live Chrome (opt-in; token rotation may invalidate that session).",
+    )
     .option("--browser-no-cookie-sync", "Skip copying cookies from Chrome.")
     .option("--browser-keep-browser", "Keep Chrome running after completion.", false)
     .option("--browser-hide-window", "Hide Chrome window after launch on macOS.", false)
@@ -1326,6 +1362,8 @@ function buildRunOptions(
     prompt: options.prompt,
     model: options.model,
     models: overrides.models ?? options.models,
+    reasoningEffort: overrides.reasoningEffort ?? options.reasoningEffort,
+    reasoningMode: overrides.reasoningMode ?? options.reasoningMode,
     previousResponseId: overrides.previousResponseId ?? options.previousResponseId,
     browserResumeConversationUrl:
       overrides.browserResumeConversationUrl ?? options.browserResumeConversationUrl,
@@ -1636,6 +1674,8 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
     browserResumeConversationUrl: stored.browserResumeConversationUrl,
     effectiveModelId: stored.effectiveModelId ?? stored.model,
     modelOverrides: stored.modelOverrides,
+    reasoningEffort: stored.reasoningEffort,
+    reasoningMode: stored.reasoningMode,
     file: stored.file ?? [],
     maxFileSizeBytes: stored.maxFileSizeBytes,
     slug: stored.slug,
@@ -1834,8 +1874,10 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   }
 
   const retentionHours = typeof options.retainHours === "number" ? options.retainHours : undefined;
-  await sessionStore.ensureStorage();
-  await pruneOldSessions(retentionHours, (message) => console.log(chalk.dim(message)));
+  if (!previewMode) {
+    await sessionStore.ensureStorage();
+    await pruneOldSessions(retentionHours, (message) => console.log(chalk.dim(message)));
+  }
   if (providerMode === "openai") {
     if (hasExplicitAzureOption(optionUsesDefault)) {
       throw new Error("--provider openai/--no-azure cannot be combined with Azure options.");
@@ -2097,6 +2139,12 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     }
   }
   const activeModel = resolvedOptions.model;
+  if (options.reasoningMode && engine !== "api") {
+    throw new Error("--reasoning-mode requires --engine api.");
+  }
+  if (options.reasoningEffort && engine !== "api") {
+    throw new Error("--reasoning-effort requires --engine api.");
+  }
 
   const browserFollowUpCount =
     options.browserFollowUp?.filter((entry) => entry.trim().length > 0).length ?? 0;
@@ -2116,6 +2164,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       ...options,
       remoteHost: remoteHost ?? undefined,
       model: activeModel,
+      browserRequestedModel: cliModelArg,
       browserModelLabel: resolveBrowserModelLabel(cliModelArg, activeModel),
     });
     return resolvedOptions.browserResumeConversationUrl
@@ -2238,6 +2287,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
         outputPath: options.output,
         aspectRatio: options.aspect,
         showThoughts: options.geminiShowThoughts,
+        allowModelFallback: options.geminiFallback,
       }),
     };
     console.log(chalk.dim("Using Gemini web client for browser automation"));
@@ -2277,6 +2327,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     waitFlag: options.wait,
     model: activeModel,
     engine,
+    reasoningMode: resolvedOptions.reasoningMode,
   });
   if (remoteHost && waitPreference === false) {
     console.log(chalk.dim("Remote browser runs require --wait; ignoring --no-wait."));
@@ -2315,6 +2366,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       outputPath: options.output,
       aspectRatio: options.aspect,
       geminiShowThoughts: options.geminiShowThoughts,
+      geminiAllowModelFallback: options.geminiFallback,
     },
     process.cwd(),
     notifications,
@@ -2330,6 +2382,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     : shouldDetachSession({
         engine,
         model: activeModel,
+        reasoningMode: resolvedOptions.reasoningMode,
         waitPreference,
         disableDetachEnv,
       });
@@ -2340,14 +2393,19 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   });
   const workerPid = !detachAllowed
     ? undefined
-    : await launchDetachedSession(sessionMeta.id, async (pid) => {
-        lifecycle = buildSessionLifecycle({
-          engine,
-          detached: true,
-          workerPid: pid,
-          reattachCommand: `oracle session ${sessionMeta.id}`,
-        });
-        await sessionStore.updateSession(sessionMeta.id, { lifecycle });
+    : await launchDetachedSession({
+        sessionId: sessionMeta.id,
+        cliEntrypoint: CLI_ENTRYPOINT,
+        env: buildDetachedPerfTraceEnv(process.env, perfTraceArgs.value, sessionMeta.id),
+        prepare: async (pid) => {
+          lifecycle = buildSessionLifecycle({
+            engine,
+            detached: true,
+            workerPid: pid,
+            reattachCommand: `oracle session ${sessionMeta.id}`,
+          });
+          await sessionStore.updateSession(sessionMeta.id, { lifecycle });
+        },
       }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         console.log(
@@ -2463,44 +2521,6 @@ async function runInteractiveSession(
   }
 }
 
-async function launchDetachedSession(
-  sessionId: string,
-  prepare: (pid: number) => Promise<void>,
-): Promise<number> {
-  return new Promise((resolve, reject) => {
-    try {
-      const args = ["--", CLI_ENTRYPOINT, "--exec-session", sessionId];
-      const env = {
-        ...buildDetachedPerfTraceEnv(process.env, perfTraceArgs.value, sessionId),
-        ORACLE_DETACHED_START_GATE: "1",
-      };
-      const child = spawn(process.execPath, args, {
-        detached: true,
-        stdio: ["pipe", "ignore", "ignore"],
-        env,
-      });
-      child.once("error", reject);
-      child.once("spawn", async () => {
-        if (child.pid === undefined) {
-          reject(new Error("Detached session worker started without a process ID."));
-          return;
-        }
-        try {
-          await prepare(child.pid);
-          child.stdin.end("ready\n");
-          child.unref();
-          resolve(child.pid);
-        } catch (error) {
-          child.kill();
-          reject(error);
-        }
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
 async function waitForDetachedStartGate(): Promise<void> {
   if (process.env.ORACLE_DETACHED_START_GATE !== "1") {
     return;
@@ -2593,6 +2613,7 @@ async function restartSession(sessionId: string, options: RestartCommandOptions)
     storedPreference: storedOptions.waitPreference,
     model: runOptions.model,
     engine,
+    reasoningMode: runOptions.reasoningMode,
   });
 
   const remoteConfig = resolveRemoteServiceConfig({
@@ -2631,6 +2652,7 @@ async function restartSession(sessionId: string, options: RestartCommandOptions)
         outputPath: storedOptions.outputPath,
         aspectRatio: storedOptions.aspectRatio,
         showThoughts: storedOptions.geminiShowThoughts,
+        allowModelFallback: storedOptions.geminiAllowModelFallback,
       }),
     };
     console.log(chalk.dim("Using Gemini web client for browser automation"));
@@ -2664,6 +2686,7 @@ async function restartSession(sessionId: string, options: RestartCommandOptions)
       outputPath: storedOptions.outputPath,
       aspectRatio: storedOptions.aspectRatio,
       geminiShowThoughts: storedOptions.geminiShowThoughts,
+      geminiAllowModelFallback: storedOptions.geminiAllowModelFallback,
     },
     cwd,
     notifications,
@@ -2682,6 +2705,7 @@ async function restartSession(sessionId: string, options: RestartCommandOptions)
     : shouldDetachSession({
         engine,
         model: runOptions.model,
+        reasoningMode: runOptions.reasoningMode,
         waitPreference,
         disableDetachEnv,
       });
@@ -2692,14 +2716,19 @@ async function restartSession(sessionId: string, options: RestartCommandOptions)
   });
   const workerPid = !detachAllowed
     ? undefined
-    : await launchDetachedSession(sessionMeta.id, async (pid) => {
-        lifecycle = buildSessionLifecycle({
-          engine,
-          detached: true,
-          workerPid: pid,
-          reattachCommand: `oracle session ${sessionMeta.id}`,
-        });
-        await sessionStore.updateSession(sessionMeta.id, { lifecycle });
+    : await launchDetachedSession({
+        sessionId: sessionMeta.id,
+        cliEntrypoint: CLI_ENTRYPOINT,
+        env: buildDetachedPerfTraceEnv(process.env, perfTraceArgs.value, sessionMeta.id),
+        prepare: async (pid) => {
+          lifecycle = buildSessionLifecycle({
+            engine,
+            detached: true,
+            workerPid: pid,
+            reattachCommand: `oracle session ${sessionMeta.id}`,
+          });
+          await sessionStore.updateSession(sessionMeta.id, { lifecycle });
+        },
       }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         console.log(
@@ -2858,6 +2887,10 @@ function printDebugHelp(cliName: string): void {
       "--browser-cookie-wait <ms|s|m>",
       "Wait before retrying cookie sync when Chrome cookies are empty or locked.",
     ],
+    [
+      "--browser-cookie-sync",
+      "Copy cookies from live Chrome (opt-in; token rotation may invalidate that session).",
+    ],
     ["--browser-no-cookie-sync", "Skip copying cookies from your main profile."],
     [
       "--browser-manual-login",
@@ -2883,14 +2916,16 @@ function resolveWaitFlag({
   waitFlag,
   model,
   engine,
+  reasoningMode,
 }: {
   waitFlag?: boolean;
   model: ModelName;
   engine: EngineMode;
+  reasoningMode?: ReasoningMode;
 }): boolean {
   if (waitFlag === true) return true;
   if (waitFlag === false) return false;
-  return defaultWaitPreference(model, engine);
+  return defaultWaitPreference(model, engine, reasoningMode);
 }
 
 function resolveRestartWaitPreference({
@@ -2898,16 +2933,18 @@ function resolveRestartWaitPreference({
   storedPreference,
   model,
   engine,
+  reasoningMode,
 }: {
   waitFlag?: boolean;
   storedPreference?: boolean;
   model: ModelName;
   engine: EngineMode;
+  reasoningMode?: ReasoningMode;
 }): boolean {
   if (waitFlag === true) return true;
   if (waitFlag === false) return false;
   if (typeof storedPreference === "boolean") return storedPreference;
-  return defaultWaitPreference(model, engine);
+  return defaultWaitPreference(model, engine, reasoningMode);
 }
 
 function resolveEffectiveModelIdForRun(model: ModelName, stored?: string): string {
@@ -2924,6 +2961,12 @@ program.action(async function (this: Command) {
 });
 
 async function main(): Promise<void> {
+  // npx runs the default binary; let the MCP transport own the alias lifetime.
+  if (process.argv[2] === "oracle-mcp") {
+    const { startMcpServer } = await import("../src/mcp/server.js");
+    await startMcpServer();
+    return;
+  }
   if (perfTraceArgs.error) {
     console.error(`error: ${perfTraceArgs.error}`);
     console.error("(use --help for usage)");

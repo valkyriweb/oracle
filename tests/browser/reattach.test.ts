@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
 import { describe, expect, test, vi } from "vitest";
 import { resumeBrowserSession, __test__ } from "../../src/browser/reattach.js";
 import type { BrowserLogger, ChromeClient } from "../../src/browser/types.js";
@@ -60,6 +63,7 @@ describe("resumeBrowserSession", () => {
       meta: { messageId: "m1", turnId: "conversation-turn-1" },
     }));
     const captureAssistantMarkdown = vi.fn(async () => "markdown response");
+    const waitForConversationHydration = vi.fn(async () => 2);
     const logger = vi.fn() as BrowserLogger;
     logger.verbose = true;
 
@@ -68,6 +72,7 @@ describe("resumeBrowserSession", () => {
       connect,
       waitForAssistantResponse,
       captureAssistantMarkdown,
+      waitForConversationHydration,
     });
 
     expect(result.answerMarkdown).toBe("markdown response");
@@ -76,6 +81,14 @@ describe("resumeBrowserSession", () => {
     );
     expect(waitForAssistantResponse).toHaveBeenCalled();
     expect(captureAssistantMarkdown).toHaveBeenCalled();
+    expect(waitForConversationHydration).toHaveBeenCalledWith(expect.anything(), 2000, logger, {
+      requirePriorTurns: true,
+      requirePromptReady: false,
+      expectedConversationUrl: runtime.tabUrl,
+    });
+    expect(waitForConversationHydration.mock.invocationCallOrder[0]).toBeLessThan(
+      waitForAssistantResponse.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -125,6 +138,7 @@ describe("resumeBrowserSession", () => {
       connect,
       waitForAssistantResponse,
       captureAssistantMarkdown,
+      waitForConversationHydration: vi.fn(async () => 2),
       promptPreview: "live reattach pro 123",
     });
 
@@ -189,6 +203,7 @@ describe("resumeBrowserSession", () => {
         waitForAssistantResponse,
         captureAssistantMarkdown,
         waitForDeepResearchCompletion,
+        waitForConversationHydration: vi.fn(async () => 2),
       },
     );
 
@@ -271,6 +286,7 @@ describe("resumeBrowserSession", () => {
         connect,
         waitForAssistantResponse,
         captureAssistantMarkdown,
+        waitForConversationHydration: vi.fn(async () => 2),
       },
     );
 
@@ -312,8 +328,13 @@ describe("resumeBrowserSession", () => {
           close,
         }) satisfies FakeClient,
     ) as unknown as (options?: unknown) => Promise<ChromeClient>;
-    const waitForAssistantResponse = vi.fn(async () => {
-      throw new Error("response timeout");
+    const waitForAssistantResponse = vi.fn(async () => ({
+      text: "must not be captured from an unhydrated shell",
+      html: "",
+      meta: { messageId: "m1", turnId: "conversation-turn-1" },
+    }));
+    const waitForConversationHydration = vi.fn(async () => {
+      throw new Error("saved conversation did not hydrate");
     });
     const recoverSession = vi.fn(async () => ({
       answerText: "fallback",
@@ -325,11 +346,13 @@ describe("resumeBrowserSession", () => {
       listTargets,
       connect,
       waitForAssistantResponse,
+      waitForConversationHydration,
       recoverSession,
     });
 
     expect(result.answerText).toBe("fallback");
     expect(close).toHaveBeenCalledOnce();
+    expect(waitForAssistantResponse).not.toHaveBeenCalled();
     expect(recoverSession).toHaveBeenCalled();
   });
 });
@@ -442,5 +465,58 @@ describe("reattach helpers", () => {
     const call = evaluate.mock.calls[0]?.[0] as EvaluateParams | undefined;
     expect(call?.expression).toContain("const conversationId = null");
     expect(call?.expression).toContain("const preferProjects = false");
+  });
+});
+
+describe("manual-login cookie sync recovery", () => {
+  test("invokes cookie sync while reopening an explicitly synchronized manual-login profile", async () => {
+    const profileDir = await mkdtemp(path.join(os.tmpdir(), "oracle-reattach-cookie-sync-"));
+    try {
+      const expected = new Error("stop after cookie sync");
+      const kill = vi.fn(async () => {});
+      const close = vi.fn(async () => {});
+      const launchChrome = vi.fn(async () => ({ port: 9222, kill }));
+      const connectToChrome = vi.fn(async () => ({
+        // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+        Network: {},
+        // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+        Page: {},
+        // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+        Runtime: { enable: vi.fn() },
+        // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+        DOM: { enable: vi.fn() },
+        // biome-ignore lint/style/useNamingConvention: mirrors DevTools protocol domain names
+        Target: {},
+        close,
+      }));
+      const syncCookies = vi.fn(async () => {
+        throw expected;
+      });
+      const logger = vi.fn() as BrowserLogger;
+
+      await expect(
+        resumeBrowserSession(
+          { tabUrl: "https://chatgpt.com/c/abc" },
+          {
+            manualLogin: true,
+            manualLoginProfileDir: profileDir,
+            cookieSync: true,
+            manualLoginCookieSync: true,
+          },
+          logger,
+          {
+            launchChrome: launchChrome as never,
+            connectToChrome: connectToChrome as never,
+            syncCookies: syncCookies as never,
+          },
+        ),
+      ).rejects.toBe(expected);
+
+      expect(syncCookies).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+      expect(kill).toHaveBeenCalledOnce();
+    } finally {
+      await rm(profileDir, { recursive: true, force: true });
+    }
   });
 });

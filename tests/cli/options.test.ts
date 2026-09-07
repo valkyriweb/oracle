@@ -194,10 +194,10 @@ describe("parseThinkingTimeOption", () => {
     ["extended", "extended"],
     ["high", "extended"],
     ["heavy", "heavy"],
-    ["extra-high", "heavy"],
-    ["extra high", "heavy"],
-    ["extrahigh", "heavy"],
-    ["xhigh", "heavy"],
+    ["extra-high", "extra-high"],
+    ["extra high", "extra-high"],
+    ["extrahigh", "extra-high"],
+    ["xhigh", "extra-high"],
   ] as const)("normalizes %s to %s", (input, expected) => {
     expect(parseThinkingTimeOption(input)).toBe(expected);
   });
@@ -259,6 +259,15 @@ describe("resolveApiModel", () => {
     expect(resolveApiModel("gpt-5.6")).toBe("gpt-5.6");
     expect(resolveApiModel("gpt-5.6-sol")).toBe("gpt-5.6-sol");
     expect(resolveApiModel("openai/gpt-5.6")).toBe("openai/gpt-5.6");
+  });
+
+  test("rejects fake GPT-5.6 Pro model slugs with API-mode guidance", () => {
+    expect(() => resolveApiModel("gpt-5.6-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
+    expect(() => resolveApiModel("gpt-5.6-sol-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
   });
 
   test("passes through unknown names (OpenRouter/custom)", () => {

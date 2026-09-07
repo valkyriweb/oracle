@@ -432,14 +432,14 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(officialSibling.runOptions.model).toBe("gpt-5.6-luna");
   });
 
-  it("maps browser engine Pro aliases to gpt-5.5-pro", () => {
+  it("maps browser engine Pro aliases to GPT-5.6 Sol", () => {
     const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
       model: "gpt-5.1-pro",
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.5-pro");
+    expect(runOptions.model).toBe("gpt-5.6-sol");
   });
 
   it("maps browser engine gpt-5.4-pro to the current ChatGPT Pro target", () => {
@@ -449,7 +449,7 @@ describe("resolveRunOptionsFromConfig", () => {
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.5-pro");
+    expect(runOptions.model).toBe("gpt-5.6-sol");
   });
 
   it("keeps gpt-5.4-pro unchanged for API engine runs", () => {

@@ -29,6 +29,7 @@ If Azure env/config is present but you want first-party OpenAI for one run, pass
 Notes:
 
 - Oracle calls Azure at `https://<resource>.openai.azure.com/openai/v1`.
+- When Azure is selected, `--base-url` and `OPENAI_BASE_URL` are ignored for both model metadata and requests; Azure keys are never used for OpenRouter catalog lookups.
 - For Responses API runs, Azure expects `model` to be your deployment name. Oracle fails early when an Azure endpoint is active without a deployment, except for `gpt-5.5-pro` where the CLI model id is used as the implicit deployment.
 - API runs print the selected route without secrets, for example `Provider: Azure OpenAI | endpoint: your-resource.openai.azure.com | deployment: my-deployment | key: AZURE_OPENAI_API_KEY|OPENAI_API_KEY`.
 - `AZURE_OPENAI_API_VERSION` is still accepted for back-compat, but Azure's v1 Responses endpoint does not require it.
@@ -66,6 +67,37 @@ Force first-party OpenAI when Azure env vars are exported:
 oracle --provider openai --engine api --model gpt-5.5-pro -p "Review this"
 oracle --no-azure --engine api --model gpt-5.5-pro -p "Review this"
 ```
+
+## GPT-5.6 Pro reasoning mode
+
+GPT-5.6 Pro is a Responses API execution mode, not a separate model slug. Select
+the Sol model and enable Pro mode explicitly:
+
+```bash
+oracle --engine api \
+  --model gpt-5.6-sol \
+  --reasoning-mode pro \
+  --reasoning-effort max \
+  -p "Review this difficult architecture" \
+  --file "src/**"
+```
+
+Oracle sends `model: "gpt-5.6-sol"` with `reasoning.mode: "pro"` and
+`reasoning.effort: "max"`. Mode and effort are independent. GPT-5.6 supports
+`none`, `low`, `medium`, `high`, `xhigh`, and `max`; without an explicit effort,
+Oracle retains the model's configured effort. Pro-mode runs use Oracle's
+long-running API defaults: they detach unless `--wait` is supplied, default to a
+60-minute timeout, and use Responses background mode when the selected route
+supports it.
+
+`--reasoning-mode` accepts `standard` or `pro`; `--reasoning-effort` accepts all
+six GPT-5.6 effort levels. Both are API-only and restricted to the GPT-5.6
+family. Oracle rejects reasoning mode for OpenRouter and custom `--base-url`
+routes because those routes currently use Oracle's Chat Completions adapter,
+which cannot represent Responses API reasoning mode.
+
+Do not pass `--model gpt-5.6-pro` or `--model gpt-5.6-sol-pro`; Oracle rejects
+those fake slugs and points to `--reasoning-mode pro`.
 
 ## Custom Base URLs (LiteLLM, Localhost)
 
@@ -109,7 +141,7 @@ Oracle keeps a stable CLI-facing model set, but some names are aliases for the c
 Notes:
 
 - `gpt-5.1-pro` and `gpt-5.2-pro` are **CLI aliases** for “the current Pro API model” — OpenAI’s API uses `gpt-5.5-pro`.
-- If you want the classic Pro tier explicitly, use `gpt-5-pro`.
+- For API runs, use `gpt-5-pro` when you want the classic Pro tier explicitly. Browser-mode generic Pro aliases follow ChatGPT's current Pro target; use `gpt-5.5-pro` there to pin GPT-5.5.
 
 ### Browser engine vs API base URLs
 

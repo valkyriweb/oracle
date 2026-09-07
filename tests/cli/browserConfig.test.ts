@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { buildBrowserConfig, resolveBrowserModelLabel } from "../../src/cli/browserConfig.js";
 
 describe("buildBrowserConfig", () => {
@@ -15,12 +15,46 @@ describe("buildBrowserConfig", () => {
       headless: undefined,
       keepBrowser: undefined,
       hideWindow: undefined,
-      desiredModel: "Pro",
+      desiredModel: "GPT-5.5",
+      thinkingTime: "pro",
       debug: undefined,
       allowCookieErrors: true,
       researchMode: "off",
       archiveConversations: undefined,
     });
+  });
+
+  test("forwards configured manual-login cookie sync to browser sessions", async () => {
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserManualLogin: true,
+      browserManualLoginCookieSync: true,
+    });
+
+    expect(config.manualLoginCookieSync).toBe(true);
+    expect(config.cookieSync).toBe(true);
+  });
+
+  test("requires explicit opt-in for ordinary Chrome cookie sync", async () => {
+    await expect(
+      buildBrowserConfig({ model: "gpt-5.5-pro", browserCookieSync: true }),
+    ).resolves.toMatchObject({ cookieSync: true });
+    await expect(
+      buildBrowserConfig({
+        model: "gpt-5.5-pro",
+        browserCookieSync: true,
+        browserNoCookieSync: true,
+      }),
+    ).resolves.toMatchObject({ cookieSync: false });
+  });
+
+  test("honors explicit headless while keeping explicit false headful", async () => {
+    await expect(
+      buildBrowserConfig({ model: "gpt-5.5-pro", browserHeadless: true }),
+    ).resolves.toMatchObject({ headless: true });
+    await expect(
+      buildBrowserConfig({ model: "gpt-5.5-pro", browserHeadless: false }),
+    ).resolves.toMatchObject({ headless: undefined });
   });
 
   test("maps gpt-5.4 browser runs to Thinking 5.4", async () => {
@@ -40,12 +74,66 @@ describe("buildBrowserConfig", () => {
     expect(config.desiredModel).toBe("GPT-5.5 Instant");
   });
 
+  test.each(["gpt-5.2", "gpt-5.2-instant", "gpt-5.2-thinking", "gpt-5.1"])(
+    "rejects retired browser model alias %s before launching Chrome",
+    async (model) => {
+      await expect(buildBrowserConfig({ model })).rejects.toThrow(
+        /ChatGPT no longer offers GPT-5\.2 base, Instant, or Thinking/,
+      );
+    },
+  );
+
+  test.each(["gpt-5-pro", "gpt-5.1-pro", "gpt-5.2-pro", "gpt-5.4-pro"])(
+    "maps current Pro browser alias %s to GPT-5.6 Sol with Pro effort",
+    async (model) => {
+      await expect(buildBrowserConfig({ model })).resolves.toMatchObject({
+        desiredModel: "GPT-5.6 Sol",
+        thinkingTime: "pro",
+      });
+    },
+  );
+
+  test("keeps the explicit GPT-5.5 Pro alias on GPT-5.5", async () => {
+    await expect(buildBrowserConfig({ model: "gpt-5.5-pro" })).resolves.toMatchObject({
+      desiredModel: "GPT-5.5",
+      thinkingTime: "pro",
+    });
+  });
+
+  test("lets an explicit effort override the current Pro alias default", async () => {
+    await expect(
+      buildBrowserConfig({ model: "gpt-5.2-pro", browserThinkingTime: "extended" }),
+    ).resolves.toMatchObject({
+      desiredModel: "GPT-5.6 Sol",
+      thinkingTime: "extended",
+    });
+  });
+
+  test("preserves Pro effort after the CLI normalizes the requested alias", async () => {
+    await expect(
+      buildBrowserConfig({
+        model: "gpt-5.6-sol",
+        browserRequestedModel: "gpt-5-pro",
+      }),
+    ).resolves.toMatchObject({
+      desiredModel: "GPT-5.6 Sol",
+      thinkingTime: "pro",
+    });
+  });
+
+  test("keeps current-model selection available for retired base aliases", async () => {
+    await expect(
+      buildBrowserConfig({ model: "gpt-5.2", browserModelStrategy: "current" }),
+    ).resolves.toMatchObject({ modelStrategy: "current" });
+  });
+
   test("sets model strategy when provided", async () => {
     const config = await buildBrowserConfig({
       model: "gpt-5.2-pro",
       browserModelStrategy: "current",
     });
     expect(config.modelStrategy).toBe("current");
+    expect(config.thinkingTime).toBeUndefined();
   });
 
   test("maps --copy-profile to copyProfileSource", async () => {
@@ -129,7 +217,7 @@ describe("buildBrowserConfig", () => {
 
   test("honors overrides and converts durations + booleans", async () => {
     const config = await buildBrowserConfig({
-      model: "gpt-5.1",
+      model: "gpt-5.4",
       browserChromeProfile: "Profile 2",
       browserChromePath: "/Applications/Chrome.app",
       browserCookiePath: "/tmp/cookies.db",
@@ -159,13 +247,92 @@ describe("buildBrowserConfig", () => {
       maxConcurrentTabs: 5,
       cookieSyncWaitMs: 4_000,
       cookieSync: false,
-      headless: undefined,
+      headless: true,
       hideWindow: true,
       keepBrowser: true,
-      desiredModel: "GPT-5.2",
+      desiredModel: "Thinking 5.4",
       debug: true,
       allowCookieErrors: true,
     });
+  });
+
+  test("accepts a valid explicit browser duration without a warning", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserTimeout: "1h30m",
+    });
+
+    expect(config.timeoutMs).toBe(5_400_000);
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  test("warns and uses the fallback for a malformed explicit browser duration", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserTimeout: "1h!30m",
+    });
+
+    expect(config.timeoutMs).toBe(1_200_000);
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-timeout duration "1h!30m"; using fallback 1200000ms.',
+    );
+    logSpy.mockRestore();
+  });
+
+  test("warns and uses the zero fallback for a malformed browser-recheck-delay duration", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserRecheckDelay: "zzz",
+    });
+
+    expect(config.assistantRecheckDelayMs).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-recheck-delay duration "zzz"; using fallback 0ms.',
+    );
+    logSpy.mockRestore();
+  });
+
+  test("warns and uses the fallback for a malformed browser-auto-reattach-timeout duration", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserAutoReattachTimeout: "zzz",
+    });
+
+    expect(config.autoReattachTimeoutMs).toBe(120_000);
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-auto-reattach-timeout duration "zzz"; using fallback 120000ms.',
+    );
+    logSpy.mockRestore();
+  });
+
+  test("warns independently for each malformed duration when several are supplied together", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const config = await buildBrowserConfig({
+      model: "gpt-5.5-pro",
+      browserInputTimeout: "zzz",
+      browserReuseWait: "zzz",
+      browserAutoReattachInterval: "zzz",
+    });
+
+    expect(config.inputTimeoutMs).toBe(60_000);
+    expect(config.reuseChromeWaitMs).toBe(0);
+    expect(config.autoReattachIntervalMs).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-input-timeout duration "zzz"; using fallback 60000ms.',
+    );
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-reuse-wait duration "zzz"; using fallback 0ms.',
+    );
+    expect(logSpy).toHaveBeenCalledWith(
+      'Warning: invalid --browser-auto-reattach-interval duration "zzz"; using fallback 0ms.',
+    );
+    expect(logSpy).toHaveBeenCalledTimes(3);
+    logSpy.mockRestore();
   });
 
   test("prefers explicit browser model label when provided", async () => {
@@ -173,13 +340,13 @@ describe("buildBrowserConfig", () => {
       model: "gpt-5.2-pro",
       browserModelLabel: "Instant",
     });
-    expect(config.desiredModel).toBe("Pro");
+    expect(config.desiredModel).toBe("GPT-5.6 Sol");
   });
 
   test("rejects invalid browser max concurrent tabs", async () => {
     await expect(
       buildBrowserConfig({
-        model: "gpt-5.1",
+        model: "gpt-5.4",
         browserMaxConcurrentTabs: "0",
       }),
     ).rejects.toThrow(/max concurrent tabs/i);
@@ -187,10 +354,10 @@ describe("buildBrowserConfig", () => {
 
   test("falls back to canonical label when override matches base model", async () => {
     const config = await buildBrowserConfig({
-      model: "gpt-5.1",
-      browserModelLabel: "gpt-5.1",
+      model: "gpt-5.4",
+      browserModelLabel: "gpt-5.4",
     });
-    expect(config.desiredModel).toBe("GPT-5.2");
+    expect(config.desiredModel).toBe("Thinking 5.4");
   });
 
   test("maps legacy Gemini Pro to current Pro label", async () => {
@@ -218,10 +385,10 @@ describe("buildBrowserConfig", () => {
 
   test("trims whitespace around override labels", async () => {
     const config = await buildBrowserConfig({
-      model: "gpt-5.1",
-      browserModelLabel: "  ChatGPT 5.1 Instant  ",
+      model: "gpt-5.4",
+      browserModelLabel: "  ChatGPT 5.4 Thinking  ",
     });
-    expect(config.desiredModel).toBe("GPT-5.2");
+    expect(config.desiredModel).toBe("Thinking 5.4");
   });
 
   test("parses remoteChrome host targets", async () => {
@@ -268,6 +435,16 @@ describe("buildBrowserConfig", () => {
     ).rejects.toThrow(/attach-running/i);
   });
 
+  test("rejects headless when attach-running is enabled", async () => {
+    await expect(
+      buildBrowserConfig({
+        model: "gpt-5.2-pro",
+        browserAttachRunning: true,
+        browserHeadless: true,
+      }),
+    ).rejects.toThrow(/browser-attach-running cannot be combined with --browser-headless/);
+  });
+
   test("rejects browser-chrome-profile when attach-running is enabled", async () => {
     await expect(
       buildBrowserConfig({
@@ -310,7 +487,7 @@ describe("buildBrowserConfig", () => {
 
   test("normalizes chatgpt-url alias and adds https when missing", async () => {
     const config = await buildBrowserConfig({
-      model: "gpt-5.1",
+      model: "gpt-5.4",
       chatgptUrl: "chatgpt.example.com/workspace",
     });
     expect(config.url).toBe("https://chatgpt.example.com/workspace");
@@ -319,7 +496,7 @@ describe("buildBrowserConfig", () => {
   test("rejects invalid chatgpt URL protocols", async () => {
     await expect(
       buildBrowserConfig({
-        model: "gpt-5.1",
+        model: "gpt-5.4",
         chatgptUrl: "ftp://chatgpt.example.com",
       }),
     ).rejects.toThrow(/http/i);
@@ -331,7 +508,7 @@ describe("buildBrowserConfig", () => {
       chatgptUrl: "https://chatgpt.com/?temporary-chat=true",
     });
     expect(config.url).toBe("https://chatgpt.com/?temporary-chat=true");
-    expect(config.desiredModel).toBe("Pro");
+    expect(config.desiredModel).toBe("GPT-5.5");
     expect(config.modelStrategy).toBe("select");
   });
 
@@ -347,11 +524,11 @@ describe("buildBrowserConfig", () => {
 
   test("allows temporary chat URLs when not targeting Pro", async () => {
     const config = await buildBrowserConfig({
-      model: "gpt-5.2",
+      model: "gpt-5.4",
       chatgptUrl: "https://chatgpt.com/?temporary-chat=true",
     });
     expect(config.url).toBe("https://chatgpt.com/?temporary-chat=true");
-    expect(config.desiredModel).toBe("GPT-5.2");
+    expect(config.desiredModel).toBe("Thinking 5.4");
   });
 
   test("accepts IPv6 remoteChrome targets wrapped in brackets", async () => {
@@ -392,14 +569,14 @@ describe("buildBrowserConfig", () => {
 
 describe("resolveBrowserModelLabel", () => {
   test("returns canonical ChatGPT label when CLI value matches API model", () => {
-    expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5.5-pro", "gpt-5.5-pro")).toBe("GPT-5.5");
     expect(resolveBrowserModelLabel("gpt-5.5-instant", "gpt-5.5-instant")).toBe("GPT-5.5 Instant");
     expect(resolveBrowserModelLabel("gpt-5.5", "gpt-5.5")).toBe("Thinking 5.5");
-    expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5.4-pro", "gpt-5.4-pro")).toBe("GPT-5.6 Sol");
     expect(resolveBrowserModelLabel("gpt-5.4", "gpt-5.4")).toBe("Thinking 5.4");
-    expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("Pro");
-    expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("Pro");
-    expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel("gpt-5-pro", "gpt-5-pro")).toBe("GPT-5.6 Sol");
+    expect(resolveBrowserModelLabel("gpt-5.2-pro", "gpt-5.2-pro")).toBe("GPT-5.6 Sol");
+    expect(resolveBrowserModelLabel("gpt-5.1-pro", "gpt-5.1-pro")).toBe("GPT-5.6 Sol");
     expect(resolveBrowserModelLabel("GPT-5.1", "gpt-5.1")).toBe("GPT-5.2");
   });
 
@@ -412,7 +589,7 @@ describe("resolveBrowserModelLabel", () => {
   });
 
   test("supports undefined or whitespace-only input", () => {
-    expect(resolveBrowserModelLabel(undefined, "gpt-5.2-pro")).toBe("Pro");
+    expect(resolveBrowserModelLabel(undefined, "gpt-5.2-pro")).toBe("GPT-5.6 Sol");
     expect(resolveBrowserModelLabel("   ", "gpt-5.1")).toBe("GPT-5.2");
   });
 

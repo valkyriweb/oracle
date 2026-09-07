@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { RunOracleOptions } from "../../src/oracle.js";
 import type { BrowserSessionConfig } from "../../src/sessionStore.js";
@@ -16,6 +19,65 @@ const baseRunOptions: RunOracleOptions = {
 const baseConfig: BrowserSessionConfig = {};
 
 describe("runBrowserSessionExecution", () => {
+  test("bounds browser prompt preparation with the configured input timeout", async () => {
+    vi.useFakeTimers();
+    const executeBrowser = vi.fn();
+    const execution = runBrowserSessionExecution(
+      {
+        runOptions: baseRunOptions,
+        browserConfig: { inputTimeoutMs: 25 },
+        cwd: "/repo",
+        log: vi.fn(),
+      },
+      {
+        assemblePrompt: () => new Promise(() => {}),
+        executeBrowser,
+      },
+    );
+    const failure = expect(execution).rejects.toMatchObject({
+      name: "BrowserAutomationError",
+      category: "browser-automation",
+      message: expect.stringContaining("--browser-input-timeout"),
+      details: {
+        stage: "prepare-prompt",
+        code: "prompt-preparation-timeout",
+        timeoutMs: 25,
+      },
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(25);
+      await failure;
+      expect(executeBrowser).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("preserves prompt preparation errors without starting the browser", async () => {
+    const executeBrowser = vi.fn();
+    const preparationError = new Error("failed to read requested input file");
+
+    await expect(
+      runBrowserSessionExecution(
+        {
+          runOptions: baseRunOptions,
+          browserConfig: { inputTimeoutMs: 1_000 },
+          cwd: "/repo",
+          log: vi.fn(),
+        },
+        {
+          assemblePrompt: async () => {
+            throw preparationError;
+          },
+          executeBrowser,
+        },
+      ),
+    ).rejects.toBe(preparationError);
+
+    expect(executeBrowser).not.toHaveBeenCalled();
+  });
+
   test("logs stats and returns usage/runtime", async () => {
     const log = vi.fn();
     const persistRuntimeHint = vi.fn();
@@ -213,7 +275,12 @@ describe("runBrowserSessionExecution", () => {
       verified: true,
     });
     expect(log).toHaveBeenCalledWith(
-      expect.stringContaining("[browser] Model selection evidence: requested=GPT-5.5 Pro"),
+      expect.stringContaining("Launching browser mode (target=GPT-5.5 Pro; requested=gpt-5.2-pro)"),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[browser] Model selection evidence: requestedKey=gpt-5.2-pro; target=GPT-5.5 Pro; resolvedLabel=Pro",
+      ),
     );
   });
 
@@ -723,12 +790,56 @@ describe("runBrowserSessionExecution", () => {
     );
     expect(executeBrowser).toHaveBeenCalledWith(
       expect.objectContaining({
-        fallbackSubmission: {
+        fallbackSubmission: expect.objectContaining({
           prompt: "fallback prompt",
           attachments: [expect.objectContaining({ path: "/repo/a.txt", displayPath: "a.txt" })],
-        },
+          prepare: expect.any(Function),
+        }),
       }),
     );
+  });
+
+  test("removes generated browser bundles after execution even when the run fails", async () => {
+    const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "oracle-browser-bundle-"));
+    const bundlePath = path.join(bundleDir, "attachments-bundle.zip");
+    await fs.writeFile(bundlePath, "zip");
+    const executeBrowser = vi.fn(async () => {
+      throw new Error("browser exploded");
+    });
+
+    await expect(
+      runBrowserSessionExecution(
+        {
+          runOptions: baseRunOptions,
+          browserConfig: baseConfig,
+          cwd: "/repo",
+          log: vi.fn(),
+        },
+        {
+          assemblePrompt: async () => ({
+            markdown: "prompt",
+            composerText: "prompt",
+            estimatedInputTokens: 5,
+            attachments: [
+              {
+                path: bundlePath,
+                displayPath: bundlePath,
+                sizeBytes: 3,
+                generatedBundle: true,
+              },
+            ],
+            inlineFileCount: 0,
+            tokenEstimateIncludesInlineFiles: false,
+            attachmentsPolicy: "always",
+            attachmentMode: "bundle",
+            fallback: null,
+          }),
+          executeBrowser,
+        },
+      ),
+    ).rejects.toThrow(/browser exploded/i);
+
+    await expect(fs.access(bundleDir)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("respects verbose logging", async () => {
@@ -844,6 +955,100 @@ describe("runBrowserSessionExecution", () => {
     expect(finishedLine).toContain("[browser]");
     expect(finishedLine).not.toContain("tok(");
     expect(finishedLine).not.toContain("tokens (");
+  });
+
+  test("uses a verified picker label in the live browser finish line", async () => {
+    const log = vi.fn();
+    await runBrowserSessionExecution(
+      {
+        runOptions: { ...baseRunOptions, model: "gpt-5.5-pro" },
+        browserConfig: { desiredModel: "Pro", modelStrategy: "select" },
+        cwd: "/repo",
+        log,
+      },
+      {
+        assemblePrompt: async () => ({
+          markdown: "prompt",
+          composerText: "prompt",
+          estimatedInputTokens: 10,
+          attachments: [],
+          inlineFileCount: 0,
+          tokenEstimateIncludesInlineFiles: false,
+          attachmentsPolicy: "auto",
+          attachmentMode: "inline",
+          fallback: null,
+        }),
+        executeBrowser: async () => ({
+          answerText: "text",
+          answerMarkdown: "markdown",
+          tookMs: 100,
+          answerTokens: 5,
+          answerChars: 10,
+          modelSelection: {
+            requestedModel: "Pro",
+            resolvedLabel: "Pro",
+            strategy: "select",
+            status: "already-selected",
+            verified: true,
+            source: "chatgpt-model-picker",
+            capturedAt: "2026-07-12T00:00:00.000Z",
+          },
+        }),
+      },
+    );
+
+    const finishedLine = log.mock.calls
+      .map((call) => String(call[0]))
+      .find((line) => line.includes("↑") && line.includes("↓") && line.includes("Δ"));
+    expect(finishedLine).toContain("Pro[browser]");
+    expect(finishedLine).not.toContain("gpt-5.5-pro[browser]");
+  });
+
+  test("keeps the requested key in the live finish line when picker evidence is unverified", async () => {
+    const log = vi.fn();
+    await runBrowserSessionExecution(
+      {
+        runOptions: { ...baseRunOptions, model: "gpt-5.5-pro" },
+        browserConfig: { desiredModel: "Pro", modelStrategy: "current" },
+        cwd: "/repo",
+        log,
+      },
+      {
+        assemblePrompt: async () => ({
+          markdown: "prompt",
+          composerText: "prompt",
+          estimatedInputTokens: 10,
+          attachments: [],
+          inlineFileCount: 0,
+          tokenEstimateIncludesInlineFiles: false,
+          attachmentsPolicy: "auto",
+          attachmentMode: "inline",
+          fallback: null,
+        }),
+        executeBrowser: async () => ({
+          answerText: "text",
+          answerMarkdown: "markdown",
+          tookMs: 100,
+          answerTokens: 5,
+          answerChars: 10,
+          modelSelection: {
+            requestedModel: "Pro",
+            resolvedLabel: "Thinking 5.5 Heavy",
+            strategy: "current",
+            status: "already-selected",
+            verified: false,
+            source: "chatgpt-model-picker",
+            capturedAt: "2026-07-12T00:00:00.000Z",
+          },
+        }),
+      },
+    );
+
+    const finishedLine = log.mock.calls
+      .map((call) => String(call[0]))
+      .find((line) => line.includes("↑") && line.includes("↓") && line.includes("Δ"));
+    expect(finishedLine).toContain("gpt-5.5-pro[browser]");
+    expect(finishedLine).not.toContain("Thinking 5.5 Heavy[browser]");
   });
 
   test("passes heartbeat interval through to browser runner", async () => {

@@ -108,14 +108,25 @@ export async function buildProjectSourcesBrowserConfig({
         envProfileDir ??
         null)
       : null;
+  const manualLoginCookieSync =
+    flagConfig.manualLoginCookieSync ?? configuredBrowser.manualLoginCookieSync;
+  const cookieSync =
+    flagConfig.cookieSync === false
+      ? false
+      : flagConfig.cookieSync === true
+        ? true
+        : manualLogin
+          ? manualLoginCookieSync === true
+          : configuredBrowser.cookieSync === true;
   return {
     ...configuredBrowser,
     ...flagConfig,
     url: projectUrl,
     chatgptUrl: projectUrl,
-    cookieSync: manualLogin ? false : (flagConfig.cookieSync ?? configuredBrowser.cookieSync),
+    cookieSync,
     manualLogin,
     manualLoginProfileDir,
+    manualLoginCookieSync,
     desiredModel: null,
     modelStrategy: "ignore",
     researchMode: "off",

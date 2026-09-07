@@ -1,11 +1,114 @@
 # Changelog
 
-## 0.16.2 — Unreleased
+## Unreleased
+
+- Release: attach the npm tarball and its checksums to the GitHub Release and verify them before the Homebrew tap updates, so the formula no longer points at a missing asset. Fixes #443.
+
+## 0.18.1 - 2026-09-05
+
+**Highlights:** More reliable browser uploads, strict remote-tab isolation, and broader support for ChatGPT's current thinking controls.
+
+- Browser: wait for explicit upload state to clear before completing attachments or sending; ignore unrelated activity, hidden indicators, and filenames that resemble status text. Fixes #446; thanks @HJC704.
+- Browser: retain per-file attachment evidence, including filename-less images, and stabilize the send target without replaying a dispatched prompt. Fixes #418; thanks @hubofvalley.
+- Browser: refuse default-tab fallback when an ordinary remote run cannot create or attach its dedicated tab; thanks @ShunmeiCho.
+- **Breaking — Remote:** accept only conversation-scoped client settings; executable paths, profiles, debugging endpoints, cookie selection, existing-tab selection, and other host settings remain controlled by the service host. Thanks @frontierkodiak.
+- Azure: ignore generic base URLs during model-metadata resolution, preventing OpenRouter catalog requests with Azure credentials.
+- Browser: select and verify thinking effort in ChatGPT's direct slider while keeping explicit Pro requests fail-closed. Fixes #422.
+- Browser: recognize Korean picker labels and localized effort-label punctuation, including Japanese, without confusing High, Extra High, or Unicode word continuations. Fixes #423 and #440; thanks @Gabrielgvl and @kiyo-e.
+- Browser: recognize the Japanese 思考量 effort label and Japanese archive controls.
+- Browser: honor the requested thinking time during Deep Research.
+- CLI: inherit browser.remoteChrome from user configuration while preserving explicit endpoints, attach-running destinations, and copy-profile choices; thanks @ShunmeiCho.
+- Browser: attach to running Chrome without DevToolsActivePort metadata, with IPv6 support and bounded endpoint retries. Fixes #414; thanks @devYRPauli.
+- Remote: preserve every attachment when upload basenames collide after sanitization. Fixes #387; thanks @postoso.
+- Browser: recognize collision-renamed attachment chips while keeping filenames, extensions, and Unicode boundaries distinct. Fixes #393; thanks @devYRPauli.
+- Browser: report ChatGPT rate limiting directly instead of presenting the modal's dismissal button as an available model.
+- Browser: retire dead running-session records when only the controller PID is available. Fixes #391; thanks @OfficialAbhinavSingh.
+- Browser: bound prompt preparation by the configured input timeout. Fixes #381.
+- Browser: restore visible macOS Chrome windows to their prior placement only when Oracle recorded that placement before hiding them.
+- CLI: keep dry-run previews free of session side effects.
+- Remote: advertise only addresses on which the service is listening.
+- Dependencies: refresh provider SDKs, browser and terminal utilities, schema/query tooling, development dependencies, pnpm, and Pages actions; update OpenAI to 7.10, Google GenAI to 2.21, Inquirer to 14.2.1, Puppeteer to 25.10, Fast URI to 4.1.4, and Vitest to 5 while retaining Node >=24 and the two-day release-age policy.
+
+## 0.18.0 — 2026-08-14
+
+### Changed
+
+- Browser: stop copying cookies from a live Chrome profile by default because ChatGPT token rotation can invalidate the user's interactive session. Use the persistent `--browser-manual-login` profile (recommended), inline cookies, or explicitly restore the old behavior with `--browser-cookie-sync` / `browser.cookieSync=true`. Fixes #367.
+- Browser: route the generic current-Pro aliases (`gpt-5-pro`, `gpt-5.1-pro`, `gpt-5.2-pro`, and `gpt-5.4-pro`) to GPT-5.6 Sol with Pro effort. Use the explicit `gpt-5.5-pro` model to keep the historical GPT-5.5 target; an explicit thinking-time setting still overrides the alias default. Fixes #373. Thanks @pdurlej!
 
 ### Fixed
 
+- Browser: detect a disabled ChatGPT effort tier (e.g. an exhausted Pro allotment) before clicking it, and report the account's own reset notice instead of a misleading "selection unverified" failure. Thanks @enieuwy!
+
+## 0.17.3 — 2026-08-13
+
+**Highlight:** browser-mode answers and recovery are reliable again — no more
+discarded responses, and authenticated sessions survive a reattach.
+
+### Fixed
+
+- Browser: treat the skip-ahead control labels as placeholder signals only when the entire turn text is short chrome text, so substantial assistant answers that mention those labels are no longer discarded.
+- Browser: align reattach recovery cookie sync with the launch path for manual-login profiles with explicit cookie sync, so recovery can reopen an authenticated conversation with supplied cookies instead of skipping sync. Thanks @enieuwy!
+- Browser: recognize the Japanese `詳細設定` → `推論レベル` controls in ChatGPT's unified Intelligence picker, allowing explicit Pro effort selection without weakening the fail-closed guard for unknown languages. Thanks @kiyo-e!
+- Browser: honor explicit `--browser-headless` for locally launched Chrome/Chromium binaries while preserving the headful default. Explicit `--browser-headless` still conflicts with `--browser-attach-running`; a saved `browser.headless` preference is ignored in attach-running mode. Thanks @enieuwy!
+
+## 0.17.2 — 2026-08-10
+
+**Highlight:** browser mode works with ChatGPT's redesigned model picker again —
+model selection moved under Advanced → Model, and the `gpt-*-pro` aliases now
+select the right model _and_ the Pro effort tier.
+
+### Fixed
+
+- Browser: navigate ChatGPT's unified picker, where the model version lives under Advanced → Model and effort under Advanced → Effort. The `gpt-5.5-pro` family of aliases now resolves to the GPT-5.5 model with Pro thinking time instead of failing against the removed flat menu; an explicit `--browser-thinking-time` still wins (#362, thanks @shivamiitgoa).
+- Security: restrict existing and newly created session transcripts, model metadata, and browser artifacts to the current user, without following symlinks during upgrade hardening. Thanks @bunlongheng!
+
+### Added
+
+- Browser: a `pro` thinking-time level that selects ChatGPT's Pro effort tier on the model it is already using. It fails closed: an unconfirmed selection aborts the run rather than silently submitting at a cheaper tier.
+
+### Changed
+
+- Dependencies: update Google GenAI, Node types, Chrome DevTools protocol, esbuild, tsx, shiki, tokentally (now pricing cached tokens), hono, protobufjs, vite, and related transitives.
+- Developer workflow: remove the obsolete scoped-commit helper and allow standard Git commands in isolated worktrees.
+
+## 0.17.1 — 2026-08-02
+
+### Changed
+
+- Dependencies: update OpenAI, Markdansi, Shiki, Hono, Fast URI, protobufjs, Vite, Puppeteer, Chrome DevTools protocol, Oxc tooling, tsx, and pnpm.
+
+### Fixed
+
+- Browser: keep `--browser-thinking-time extra-high` as Extra High (non-Pro) on GPT-5.6 Sol instead of selecting Pro. Fixes #353.
+- Browser: match German Intelligence effort labels with whole-word Latin matching, and keep the currently selected effort when a requested tier has no matching row. Thanks @Jonasdero!
+
+## 0.17.0 — 2026-08-02
+
+### Added
+
+- API: add explicit GPT-5.6 reasoning mode and effort controls, including Pro mode, session persistence, long-run handling, and fail-closed route validation. Thanks @enki!
+
+### Changed
+
+- Dependencies: update Google GenAI, MCP SDK, OpenAI, Chalk, Shiki, TokenTally, Puppeteer, Chrome DevTools protocol, Oxc tooling, and related packages.
+
+### Docs
+
+- Rewrite the README around a verified install and quickstart, with detailed workflows linked to the docs site.
+
+### Fixed
+
+- Browser: reject retired GPT-5.2 base, Instant, and Thinking aliases before launching Chrome while keeping API aliases and legacy Pro routing. Fixes #344. Thanks @HidakaKoyo!
+- Browser: preserve authenticated model-picker errors instead of appending a misleading cookie/login hint after login has already been verified.
+- Browser: distinguish requested CLI model keys from verified ChatGPT picker labels without inferring a server-side GPT version from a generic label. Fixes #317. Thanks @DragonFSKY!
+- Browser: recognize GPT-5.6 Sol as the selected model when ChatGPT exposes Pro in its independent effort pill. Thanks @jung0han!
+- Browser: treat WSL's systemd-resolved loopback DNS stub as localhost when connecting to a freshly launched Chrome DevTools endpoint. Thanks @Rokurolize!
+- CLI: reject junk between duration tokens and warn when malformed browser duration flags fall back to defaults. Thanks @devYRPauli!
 - Browser: run long local Pro consultations in a detached worker while the CLI remains attached to its session log, so unexpected foreground termination cannot stop answer capture; Ctrl-C still cancels the worker. Thanks @Rokurolize!
 - Browser: recognize ChatGPT's separate Pro effort control as the selected maximum effort for GPT-5.6 Sol when `--browser-thinking-time heavy` is requested. Thanks @Rokurolize!
+- Gemini: type `.mp4`, `.mov`, and `.webm` uploads as video so Gemini receives them instead of silently discarding generic binary uploads. Thanks @mkubenka!
+- Browser: wait for saved conversation turns to hydrate before retrying capture after a reload or reattach, and reject shell-only stop controls as recovery evidence. Thanks @pdurlej!
 
 ## 0.16.1 — 2026-07-23
 

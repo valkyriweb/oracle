@@ -1,16 +1,18 @@
 import type { EngineMode } from "./engine.js";
-import type { ModelName } from "../oracle.js";
+import type { ModelName, ReasoningMode } from "../oracle.js";
 import { isProModel } from "../oracle/modelResolver.js";
 
 export function shouldDetachSession({
   // Params kept for policy tweaks.
   engine,
   model,
+  reasoningMode,
   waitPreference,
   disableDetachEnv,
 }: {
   engine: EngineMode;
   model: ModelName;
+  reasoningMode?: ReasoningMode;
   waitPreference: boolean;
   disableDetachEnv: boolean;
 }): boolean {
@@ -22,7 +24,7 @@ export function shouldDetachSession({
   // For API runs, explicit --wait keeps execution in the foreground.
   if (waitPreference) return false;
   // Pro-tier API runs start detached by default.
-  if (isProModel(model) && engine === "api") return true;
+  if ((isProModel(model) || reasoningMode === "pro") && engine === "api") return true;
   return false;
 }
 

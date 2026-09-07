@@ -16,6 +16,14 @@ and run the live API suite before shipping major transport changes.
 
 ## Test Cases
 
+### Attachment evidence and single-send regression (no login)
+
+Run `pnpm build && node scripts/attachment-send-proof.mjs` with Chrome installed (`CHROME_PATH` can select Chromium on Linux). This uses a disposable profile and a controlled local page, not a signed-in consultation. It exercises local and remote three-file uploads, a filename-less JPEG with a consumed FileList, sidebar-count rejection, byte integrity, delayed commitment, and offscreen button recovery. Each send must produce exactly one trusted click, zero Enter events, and one committed turn. The Linux Chrome CI job runs it too.
+
+The disposable profile and fixtures live in a temporary, non-hidden directory under your home directory and are removed afterward. This lets Snap Chromium read the same files as Node instead of looking in its private `/tmp`. An optional directory argument retains the fixtures for manual testing; that directory must also be readable by the selected browser.
+
+The attachment proof also holds composer upload progress active for longer than three seconds inside a non-editable attachment widget nested in a rich-text editor, verifies completion and send both refuse it without input, then clears it and verifies one successful send despite unrelated page progress. Readiness uses explicit loading/busy state and native/ARIA progress controls; filenames and status prose alone cannot establish an active transfer.
+
 ### Quick browser port smoke
 
 - `pnpm test:browser` — launches headful Chrome and checks the DevTools endpoint is reachable. Set `ORACLE_BROWSER_PORT` (or `ORACLE_BROWSER_DEBUG_PORT`) to reuse a fixed port when you’ve already opened a firewall rule.
@@ -103,7 +111,7 @@ Debug note: when you have a live ChatGPT tab open under a DevTools port and need
 1. **Prompt Submission & Model Switching**
    - With Chrome signed in and cookie sync enabled, run
      ```bash
-     pnpm run oracle -- --engine browser --model gpt-5.5 \
+     pnpm run oracle -- --engine browser --browser-cookie-sync --model gpt-5.5 \
        --prompt "Line 1\nLine 2\nLine 3"
      ```
    - Observe logs for:
@@ -115,7 +123,7 @@ Debug note: when you have a live ChatGPT tab open under a DevTools port and need
 2. **Markdown Capture**
    - Prompt:
      ```bash
-     pnpm run oracle -- --engine browser --model gpt-5.5 \
+     pnpm run oracle -- --engine browser --browser-cookie-sync --model gpt-5.5 \
        --prompt "Produce a short bullet list with code fencing."
      ```
    - Expected CLI output:
@@ -156,25 +164,34 @@ Document results (pass/fail, session IDs) in PR descriptions so reviewers can au
 Run these four smoke tests whenever we touch browser automation:
 
 1. **GPT-5.5 simple prompt**
-   `pnpm run oracle -- --engine browser --model gpt-5.5 --prompt "Give me two short markdown bullet points about tables"`
+   `pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5 --prompt "Give me two short markdown bullet points about tables"`
    Expect two markdown bullets, no files/search referenced. Note the session ID (e.g., `give-me-two-short-markdown`).
 
 2. **GPT-5.5 simple prompt**
-   `pnpm run oracle -- --engine browser --model gpt-5.5 --prompt "List two reasons Markdown is handy"`
+   `pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5 --prompt "List two reasons Markdown is handy"`
    Confirm the answer arrives (and only once) even if it takes ~2–3 minutes.
 
 2b. **GPT-5.5 Instant smoke**
-`pnpm run oracle -- --engine browser --model gpt-5.5-instant --prompt "Give me two short markdown bullet points about tables"`
+`pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5-instant --prompt "Give me two short markdown bullet points about tables"`
 Expect a near-instant response (no Thinking spinner) and confirm the composer pill shows the "Instant" row, not "Thinking 5.5" or "Pro". Run after any change to the 5.5 picker tokens.
+
+2c. **GPT-5.5 Pro effort through the unified picker**
+`pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5-pro --write-output response.txt --prompt "Say Hi!"`
+Confirm the logs report a verified GPT-5.5 model followed by `Thinking time: Pro`, and `response.txt` contains the captured answer. Exercise both a tab starting on another model and a retained tab where GPT-5.5 is already selected. Never click ChatGPT's "Answer now" shortcut while the Pro response is thinking.
 
 3. **GPT-5.5 + attachment**
    Prepare `/tmp/browser-md.txt` with a short note, then run
-   `pnpm run oracle -- --engine browser --model gpt-5.5 --prompt "Summarize the key idea from the attached note" --file /tmp/browser-md.txt`
+   `pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5 --prompt "Summarize the key idea from the attached note" --file /tmp/browser-md.txt`
    Ensure upload logs show “Attachment queued” and the answer references the file contents explicitly.
+
+3b. **GPT-5.5 + multi-file ZIP**
+Create `/tmp/oracle-zip-smoke/src/one.txt` and `/tmp/oracle-zip-smoke/src/two.txt` with distinct sentinel text, then run
+`pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5 --browser-attachments always --browser-bundle-format zip --prompt "Extract the attached bundle, report both relative paths, and quote each sentinel." --file /tmp/oracle-zip-smoke/src`
+Confirm Oracle uploads one `attachments-bundle.zip`, the submitted composer text includes the extraction instruction, and the answer reports both paths and sentinels from the extracted tree.
 
 4. **GPT-5.5 + attachment (verbose)**
    Prepare `/tmp/browser-report.txt` with faux metrics, then run
-   `pnpm run oracle -- --engine browser --model gpt-5.5 --prompt "Use the attachment to report current CPU and memory figures" --file /tmp/browser-report.txt --verbose`
+   `pnpm run oracle -- --engine browser --browser-manual-login --model gpt-5.5 --prompt "Use the attachment to report current CPU and memory figures" --file /tmp/browser-report.txt --verbose`
    Verify verbose logs show attachment upload and the final answer matches the file data.
 
 5. **Deep Research smoke**
@@ -250,8 +267,8 @@ Use this when you need to inspect the live ChatGPT composer (DOM state, markdown
 
    ```bash
    tmux new -d -s oracle-browser \\
-     "pnpm run oracle -- --engine browser --browser-keep-browser \\
-      --model 'GPT-5.5 Pro' --prompt 'Debug via DevTools.'"
+     "pnpm run oracle -- --engine browser --browser-manual-login --browser-keep-browser \\
+      --model gpt-5.5 --browser-thinking-time pro --prompt 'Debug via DevTools.'"
    ```
 
    Keeping the run in tmux prevents your shell from blocking and ensures Chrome stays open afterward.
@@ -299,9 +316,9 @@ These Vitest cases hit the real OpenAI API to exercise both transports:
    pnpm vitest run tests/live/openai-live.test.ts
    ```
 2. The first two tests target the standard GPT-5 (`gpt-5.1` / `gpt-5.2`) foreground
-   streaming paths. The later background tests send `gpt-5.5-pro` and `gpt-5.2-pro`
-   prompts and expect the CLI to stay in background mode until OpenAI finishes
-   (up to 30 minutes).
+   streaming paths. The later background tests send `gpt-5.5-pro` and GPT-5.6 Sol
+   with Pro mode and max reasoning effort prompts and expect the CLI to stay in
+   background mode until OpenAI finishes (up to 30 minutes).
 3. Watch the console for `Reconnected to OpenAI background response...` if
    you're debugging transport flakiness; the test will fail if the response
    status isn't `completed` or if the text doesn't contain the hard-coded

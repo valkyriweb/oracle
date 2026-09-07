@@ -1,10 +1,13 @@
 overrides:
-  devtools-protocol: 0.0.1666840
-  hono: 4.12.31
-  "@hono/node-server": 2.0.11
-  fast-uri: 3.1.4
-  protobufjs: 7.6.5
-  vite: 8.0.16
+  devtools-protocol: 0.0.1691330
+  hono: 4.13.5
+  "@hono/node-server": 2.1.1
+  fast-uri: 4.1.4
+  protobufjs: 8.8.0
+  vite: 8.2.2
 
-onlyBuiltDependencies:
-  - esbuild
+allowBuilds:
+  "@google/genai": false
+  esbuild: true
+
+minimumReleaseAge: 2880
