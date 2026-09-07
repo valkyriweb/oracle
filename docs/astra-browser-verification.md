@@ -5,7 +5,7 @@
 - Upstream `54dafa78` merged without rewriting history in `aa78df80`.
 - Astra support commit: `e80290dd`.
 - Canonical checkout rebuilt; `oracle --version` reports `0.18.1`.
-- Local `main` contains the merge and feature; not yet pushed to `origin`.
+- Local `main` contains the merge and feature. Its commits are published on `origin/update/astra-pro` in draft PR https://github.com/valkyriweb/oracle/pull/3; the remote default branch is unchanged pending verification/review.
 - Existing user config still selects GPT-5.6/heavy. No default model or authentication setting changed pending end-to-end verification.
 
 ## Verified
@@ -26,14 +26,14 @@ The installed CLI verified `resolvedLabel=6Pro`, Pro effort, and authenticated l
 
 Evidence: `~/.oracle/sessions/astra-pro-approved-smoke/artifacts/transcript.md`, `/tmp/oracle-astra-approved.log`, `/tmp/oracle-astra-approved-answer.md`, and `/tmp/oracle-astra-approved-replay.log`.
 
-The subsequent `astra-pro-attachment-smoke` failed before submission at another 20-second Chrome debugging-approval timeout. Its monitor was stopped at closeout. Earlier failed CLI processes did not exit cleanly; inspect session-owned processes before attempting cleanup, and do not kill shared browsers or services. Do not infer that one successful attach permanently grants future connections.
+The subsequent `astra-pro-attachment-smoke` failed before submission at another 20-second Chrome debugging-approval timeout. Its monitor was stopped at closeout. Earlier failed CLI processes did not exit cleanly; the two identified stale test processes were terminated during closeout without killing shared browsers or services. Do not infer that one successful attach permanently grants future connections.
 
-### Tracked local WIP (publication pending approval)
+### Published WIP — draft PR #3
 
 - Branches/commits: feature `update/astra-pro` at `e80290dd`; integrated local `main` also contains merge `aa78df80` and this handoff.
-- Issue/PR: none created; remote publication remains pending. This document is the local handoff, not a substitute for the outstanding remote tracking step.
+- Issue/PR: https://github.com/valkyriweb/oracle/pull/3 (draft). GitHub Issues are disabled on the fork; this PR owns the remaining verification and handoff.
 - Why incomplete: attachment approval blocked; mbp-13 SSH inventory timed out; OpenClaw/PinchTab compatibility has not been exercised.
-- Next action: establish the explicitly authorized isolated authenticated browser path, run the synthetic attachment test and replay, then install/review/test the update on mbp-13. Verify OpenClaw/PinchTab CDP compatibility before changing transport. Finish defaults and publication only after the relevant checks/approval.
+- Next action: establish the explicitly authorized isolated authenticated browser path, run the synthetic attachment test and replay, then install/review/test the update on mbp-13. Verify OpenClaw/PinchTab CDP compatibility before changing transport. Finish defaults and mark the PR ready only after the relevant checks/review.
 - Verification: 2149 deterministic tests and live text capture/replay passed; attachments, mbp-13, PinchTab stealth/cookie login, OpenClaw node transport, and live in-flight reattachment remain unverified. Existing user defaults are unchanged.
 
 ## Related OpenClaw client work
