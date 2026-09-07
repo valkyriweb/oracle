@@ -10,6 +10,11 @@ import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
 import { throwIfThrottled } from "../chatgptThrottle.js";
 import { delay } from "../utils.js";
+import {
+  buildAstraModelSelectionExpression,
+  isAstraModelLabel,
+  isAstraSelectionLabel,
+} from "./astraModelSelection.js";
 
 const LEGACY_PRO_VERSION_WORD_TOKENS = ["5 4", "5 2", "5 1", "5 0", "gpt 5 pro"] as const;
 const LEGACY_PRO_VERSION_COMPACT_TOKENS = ["gpt54", "gpt52", "gpt51", "gpt50"] as const;
@@ -117,6 +122,14 @@ export async function ensureModelSelection(
 }
 
 function assertResolvedModelSelection(desiredModel: string, resolvedLabel: string): void {
+  if (isAstraModelLabel(desiredModel)) {
+    if (!isAstraSelectionLabel(resolvedLabel)) {
+      throw new Error(
+        `Model picker selected "${resolvedLabel}" while "${desiredModel}" requires GPT-6 Astra.`,
+      );
+    }
+    return;
+  }
   const desired = desiredModel.toLowerCase();
   const resolved = resolvedLabel.toLowerCase();
   const normalizedDesired = normalizeResolvedModelLabel(desired);
@@ -125,10 +138,7 @@ function assertResolvedModelSelection(desiredModel: string, resolvedLabel: strin
     /(?:^| )5 6(?: |$)/.test(normalizedDesired) && normalizedDesired.split(" ").includes("sol");
   if (wantsGpt56Sol) {
     const resolvedTokens = normalizedResolved.split(" ");
-    if (
-      !/(?:^| )5 6(?: |$)/.test(normalizedResolved) ||
-      !resolvedTokens.includes("sol")
-    ) {
+    if (!/(?:^| )5 6(?: |$)/.test(normalizedResolved) || !resolvedTokens.includes("sol")) {
       throw new Error(
         `Model picker selected "${resolvedLabel}" while "${desiredModel}" requires GPT-5.6 Sol.`,
       );
@@ -190,6 +200,9 @@ function buildModelSelectionExpression(
   targetModel: string,
   strategy: BrowserModelStrategy,
 ): string {
+  if (isAstraModelLabel(targetModel)) {
+    return buildAstraModelSelectionExpression(strategy);
+  }
   const matchers = buildModelMatchersLiteral(targetModel);
   const composerSignalMatchers = buildComposerSignalMatchers(targetModel);
   const labelLiteral = JSON.stringify(matchers.labelTokens);

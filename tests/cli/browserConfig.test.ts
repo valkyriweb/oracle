@@ -62,6 +62,19 @@ describe("buildBrowserConfig", () => {
     expect(config.desiredModel).toBe("Thinking 5.4");
   });
 
+  test.each(["gpt-6", "gpt-6-astra"])(
+    "maps %s with independently requested Pro effort",
+    async (model) => {
+      await expect(
+        buildBrowserConfig({ model, browserThinkingTime: "pro" }),
+      ).resolves.toMatchObject({
+        desiredModel: "GPT-6 Astra",
+        thinkingTime: "pro",
+      });
+      expect((await buildBrowserConfig({ model })).thinkingTime).toBeUndefined();
+    },
+  );
+
   test("maps the GPT-5.6 family and explicit Sol variant separately", async () => {
     const config = await buildBrowserConfig({ model: "gpt-5.6" });
     expect(config.desiredModel).toBe("GPT-5.6 Sol");

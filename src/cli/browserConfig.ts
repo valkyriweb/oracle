@@ -33,6 +33,8 @@ const CURRENT_CHATGPT_PRO_ALIASES = new Set([
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
 const BROWSER_MODEL_LABELS: [ModelName, string][] = [
   // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
+  ["gpt-6", "GPT-6 Astra"],
+  ["gpt-6-astra", "GPT-6 Astra"],
   ["gpt-5.6-sol", "GPT-5.6 Sol"],
   ["gpt-5.6", "GPT-5.6 Sol"],
   ["gpt-5.5-pro", "GPT-5.5"],

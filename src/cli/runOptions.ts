@@ -58,7 +58,8 @@ export function resolveRunOptionsFromConfig({
     .filter(Boolean);
 
   const cliModelArg = normalizeModelOption(model ?? userConfig?.model) || DEFAULT_MODEL;
-  const apiModel = resolveApiModel(cliModelArg);
+  const apiModel =
+    resolvedEngine === "browser" ? inferModelFromLabel(cliModelArg) : resolveApiModel(cliModelArg);
   // Browser label inference is intentionally engine-scoped: API model ids such as
   // gpt-5.6-luna must remain provider values even though browser mode rejects
   // unrecognized GPT-5.6 picker variants.
@@ -98,7 +99,7 @@ export function resolveRunOptionsFromConfig({
       ? "api"
       : resolvedEngine;
   // Browser runs use ChatGPT picker labels/aliases; API runs must keep API model ids intact.
-  const resolvedModel = fixedEngine === "browser" ? browserModel : apiModel;
+  const resolvedModel = fixedEngine === "browser" ? browserModel : resolveApiModel(cliModelArg);
 
   const promptWithSuffix =
     userConfig?.promptSuffix && userConfig.promptSuffix.trim().length > 0

@@ -279,6 +279,21 @@ describe("resolveApiModel", () => {
 });
 
 describe("inferModelFromLabel", () => {
+  test.each(["gpt-6", "gpt-6-astra", "GPT-6 Astra", "astra", "ChatGPT 6"])(
+    "resolves browser-only Astra alias %s",
+    (label) => {
+      expect(inferModelFromLabel(label)).toBe("gpt-6");
+      expect(() => resolveApiModel(label)).toThrow("browser-only");
+    },
+  );
+
+  test.each(["gpt-6-pro", "gpt-6-astra-pro", "GPT-6 Luna"])(
+    "rejects ambiguous Astra variant %s",
+    (label) => {
+      expect(() => inferModelFromLabel(label)).toThrow("Unknown GPT-6 browser variant");
+    },
+  );
+
   test("returns canonical names when label already matches", () => {
     expect(inferModelFromLabel("gpt-5.6")).toBe("gpt-5.6");
     expect(inferModelFromLabel("gpt-5.5-pro")).toBe("gpt-5.5-pro");

@@ -1833,9 +1833,23 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   }
 
   const providerMode = resolveApiProviderMode(options);
+  const explicitApiProviderRequested =
+    providerMode !== "auto" || hasExplicitAzureOption(optionUsesDefault);
+  let engine: EngineMode = resolveEngine({
+    engine: options.engine,
+    configEngine: userConfig.engine,
+    browserFlag: options.browser,
+    apiProviderRequested: explicitApiProviderRequested,
+    env: process.env,
+  });
+  const engineModelArg = normalizeModelOption(options.model) || DEFAULT_MODEL;
   const engineModels = multiModelProvided
     ? Array.from(new Set(options.models!.map((entry) => resolveApiModel(entry))))
-    : [resolveApiModel(normalizeModelOption(options.model) || DEFAULT_MODEL)];
+    : [
+        engine === "browser" && !options.route && !options.preflight
+          ? inferModelFromLabel(engineModelArg)
+          : resolveApiModel(engineModelArg),
+      ];
   if (options.route || options.preflight) {
     const routeAzureEndpoint = firstNonEmpty(
       options.azureEndpoint,
@@ -1916,20 +1930,11 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     providerMode !== "openai" &&
     Boolean(options.azureEndpoint?.trim()) &&
     engineModels.some((model) => isAzureOpenAICandidateModel(model));
-  const explicitApiProviderRequested =
-    providerMode !== "auto" || hasExplicitAzureOption(optionUsesDefault);
   const envEnginePreference = (process.env.ORACLE_ENGINE ?? "").trim().toLowerCase();
   const explicitApiEngineRequested =
     options.engine === "api" || (!options.engine && envEnginePreference === "api");
   const configBrowserEngineRequested =
     userConfig.engine === "browser" && !explicitApiEngineRequested && !explicitApiProviderRequested;
-  let engine: EngineMode = resolveEngine({
-    engine: options.engine,
-    configEngine: userConfig.engine,
-    browserFlag: options.browser,
-    apiProviderRequested: explicitApiProviderRequested,
-    env: process.env,
-  });
   const browserEngineRequested =
     options.browser ||
     options.engine === "browser" ||

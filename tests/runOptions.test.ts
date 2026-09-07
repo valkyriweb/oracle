@@ -6,6 +6,26 @@ import { DEFAULT_MODEL, MODEL_CONFIGS } from "../src/oracle/config.js";
 describe("resolveRunOptionsFromConfig", () => {
   const basePrompt = "This prompt is comfortably above twenty characters.";
 
+  it.each(["gpt-6", "gpt-6-astra", "astra"])(
+    "keeps %s in browser mode without invoking API resolution",
+    (model) => {
+      expect(
+        resolveRunOptionsFromConfig({
+          prompt: basePrompt,
+          model,
+          userConfig: { engine: "browser" },
+          env: {},
+        }),
+      ).toMatchObject({
+        resolvedEngine: "browser",
+        runOptions: { model: "gpt-6" },
+      });
+      expect(() =>
+        resolveRunOptionsFromConfig({ prompt: basePrompt, model, engine: "api", env: {} }),
+      ).toThrow("browser-only");
+    },
+  );
+
   it("uses config engine when none provided and env lacks OPENAI_API_KEY", () => {
     const { resolvedEngine } = resolveRunOptionsFromConfig({
       prompt: basePrompt,

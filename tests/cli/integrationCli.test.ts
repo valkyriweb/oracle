@@ -104,6 +104,54 @@ function waitForChildOutput(child: CliChild, timeoutMs: number): Promise<void> {
 
 describe("oracle CLI integration", () => {
   test(
+    "routes Astra previews through the browser and rejects API aliases",
+    async () => {
+      const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-astra-cli-"));
+      try {
+        const options = {
+          env: { ...process.env, ORACLE_HOME_DIR: oracleHome },
+          timeout: INTEGRATION_TIMEOUT,
+        };
+        const result = await execCli(
+          [
+            "--engine",
+            "browser",
+            "--model",
+            "gpt-6-astra",
+            "--browser-thinking-time",
+            "pro",
+            "--dry-run",
+            "summary",
+            "-p",
+            "A harmless Astra routing preview.",
+          ],
+          options,
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout).toContain("target=GPT-6 Astra; requested=gpt-6");
+        const api = await execCli(
+          [
+            "--engine",
+            "api",
+            "--model",
+            "gpt-6",
+            "--dry-run",
+            "summary",
+            "-p",
+            "A harmless Astra routing preview.",
+          ],
+          options,
+        );
+        expect(api.code).toBe(1);
+        expect(`${api.stdout}\n${api.stderr}`).toContain("browser-only");
+      } finally {
+        await rm(oracleHome, { recursive: true, force: true });
+      }
+    },
+    INTEGRATION_TIMEOUT,
+  );
+
+  test(
     "exits nonzero when a detached worker receives an unknown session id",
     async () => {
       const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-missing-session-"));
