@@ -18,13 +18,31 @@
 - On an isolated Chrome tab, the production selector expression switched GPT-5.6 Sol to `6Pro` via the `Latest` row and verified the observed version.
 - Production thinking-time expression switched Medium to Pro and verified the accessible slider announcement, not just the maximum numeric position.
 
-## Blocked live smoke
+## Live smoke and remaining handoff
 
-Session: `astra-pro-markdown-smoke`.
+Completed session: `astra-pro-approved-smoke` (exit 0, 61.3 seconds).
 
-The installed CLI connected to the existing Chrome DevTools endpoint but timed out waiting for Chrome's remote-debugging permission. No prompt was sent. Luke must approve Chrome's prompt before retrying; do not toggle permissions or restart Chrome unattended.
+The installed CLI verified `resolvedLabel=6Pro`, Pro effort, and authenticated login; submitted the harmless prompt; captured the complete Markdown answer; wrote a 705-byte output file; and replayed the saved session successfully. The answer preserved its heading, checklist, fenced JavaScript, and final sum 42. Browser-tab cleanup logged a failure, despite successful answer capture and CLI exit.
 
-Pending: completed Pro text/Markdown response, synthetic attachment response, output-file integrity, and saved-session replay. Do not claim end-to-end success or universal reliability.
+Evidence: `~/.oracle/sessions/astra-pro-approved-smoke/artifacts/transcript.md`, `/tmp/oracle-astra-approved.log`, `/tmp/oracle-astra-approved-answer.md`, and `/tmp/oracle-astra-approved-replay.log`.
+
+The subsequent `astra-pro-attachment-smoke` failed before submission at another 20-second Chrome debugging-approval timeout. Its monitor was stopped at closeout. Earlier failed CLI processes did not exit cleanly; inspect session-owned processes before attempting cleanup, and do not kill shared browsers or services. Do not infer that one successful attach permanently grants future connections.
+
+### Tracked local WIP (publication pending approval)
+
+- Branches/commits: feature `update/astra-pro` at `e80290dd`; integrated local `main` also contains merge `aa78df80` and this handoff.
+- Issue/PR: none created; remote publication remains pending. This document is the local handoff, not a substitute for the outstanding remote tracking step.
+- Why incomplete: attachment approval blocked; mbp-13 SSH inventory timed out; OpenClaw/PinchTab compatibility has not been exercised.
+- Next action: establish the explicitly authorized isolated authenticated browser path, run the synthetic attachment test and replay, then install/review/test the update on mbp-13. Verify OpenClaw/PinchTab CDP compatibility before changing transport. Finish defaults and publication only after the relevant checks/approval.
+- Verification: 2149 deterministic tests and live text capture/replay passed; attachments, mbp-13, PinchTab stealth/cookie login, OpenClaw node transport, and live in-flight reattachment remain unverified. Existing user defaults are unchanged.
+
+## Related OpenClaw client work
+
+Production was checked read-only: OpenClaw 2026.9.2 (`93f5d81`), image `v2026.9.2-r275`, ready replica and matching rollout revisions.
+
+At Luke's request, local m2-max and Mac Mini CLIs were updated from isolated 2026.9.1 installs to isolated npm 2026.9.2 (`3928bad`) installs under `~/.local/lib/openclaw/2026.9.2`; `~/.local/bin/openclaw` links were switched only after version/config validation. Both CLI versions and config validation passed; both expose `cookie-sync` and `import-profile`. Old installs remain. No gateway/node service was restarted; local node-status verification timed out, so this does not establish node runtime health or upgrade running nodes.
+
+OpenClaw documentation supports host-local `import-profile`, domain-allowlisted `cookie-sync` to a remote Gateway, and browser-node routing/pinning. Import does not run through the node proxy and transfers cookies, not local storage/IndexedDB. These docs do not establish PinchTab/stealth or Oracle compatibility. Luke approved cookie copying/import for this login work, but no cookies were transferred in this session.
 
 Command shape:
 
