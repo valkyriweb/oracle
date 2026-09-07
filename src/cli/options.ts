@@ -164,7 +164,7 @@ export function parseThinkingTimeOption(value: string): ThinkingTimeLevel {
     return normalized;
   }
   throw new InvalidArgumentError(
-    'Thinking time must be one of "light", "standard", "extended", "heavy", or a ChatGPT UI alias like "instant", "medium", "high", or "extra-high".',
+    'Thinking time must be one of "light", "standard", "extended", "extra-high", "pro", "heavy", or a ChatGPT UI alias like "instant", "medium", "high", or "xhigh".',
   );
 }
 
@@ -222,11 +222,22 @@ function isGeminiDeepThinkAlias(normalized: string): boolean {
 
 export function resolveApiModel(modelValue: string): ModelName {
   const normalized = normalizeModelOption(modelValue).toLowerCase();
+  if (parseBrowserAstraLabel(normalized) !== null) {
+    throw new InvalidArgumentError(
+      "GPT-6 Astra aliases are browser-only here. Use --engine browser --model gpt-6 --browser-thinking-time pro.",
+    );
+  }
   if (normalized in MODEL_CONFIGS) {
     return normalized as ModelName;
   }
   if (normalized.includes("/")) {
     return normalized as ModelName;
+  }
+  const gpt56Label = parseBrowserGpt56Label(normalized);
+  if (gpt56Label?.variant.split(" ").includes("pro")) {
+    throw new InvalidArgumentError(
+      "GPT-5.6 Pro is an API reasoning mode, not a model slug. Use --model gpt-5.6-sol --reasoning-mode pro.",
+    );
   }
   if (normalized.includes("grok")) {
     return "grok-4.1";
@@ -317,6 +328,14 @@ export function isGpt56BrowserLabel(modelValue: string): boolean {
   return parseBrowserGpt56Label(modelValue) !== null;
 }
 
+function parseBrowserAstraLabel(modelValue: string): string | null {
+  const normalized = normalizeModelOption(modelValue).toLowerCase();
+  if (normalized.includes("/")) return null;
+  if (normalized === "astra") return "astra";
+  const match = normalized.match(/^(?:(?:chatgpt|gpt)[\s._-]*)?6(?:[\s._-]+(.+))?$/);
+  return match ? (match[1] ?? "").replace(/[^a-z0-9]+/g, " ").trim() : null;
+}
+
 export function inferModelFromLabel(modelValue: string): ModelName {
   const normalized = normalizeModelOption(modelValue).toLowerCase();
   if (!normalized) {
@@ -358,6 +377,13 @@ export function inferModelFromLabel(modelValue: string): ModelName {
       return "gemini-3.1-pro";
     }
     return "gemini-3-pro";
+  }
+  const astraVariant = parseBrowserAstraLabel(normalized);
+  if (astraVariant !== null) {
+    if (!astraVariant || astraVariant === "astra") return "gpt-6";
+    throw new InvalidArgumentError(
+      `Unknown GPT-6 browser variant "${astraVariant}". Use --model gpt-6 --browser-thinking-time pro for Astra at Pro effort.`,
+    );
   }
   if (normalized.includes("classic")) {
     return "gpt-5-pro";

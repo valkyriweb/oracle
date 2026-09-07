@@ -46,7 +46,7 @@ export const DEFAULT_BROWSER_CONFIG: ResolvedBrowserConfig = {
   autoReattachDelayMs: 0,
   autoReattachIntervalMs: 0,
   autoReattachTimeoutMs: 120_000,
-  cookieSync: true,
+  cookieSync: false,
   cookieNames: DEFAULT_CHATGPT_COOKIE_NAMES,
   cookieSyncWaitMs: 0,
   inlineCookies: null,
@@ -95,7 +95,6 @@ export function resolveBrowserConfig(
   const isWindows = process.platform === "win32";
   const manualLogin =
     config?.manualLogin ?? (isWindows ? true : DEFAULT_BROWSER_CONFIG.manualLogin);
-  const cookieSyncDefault = isWindows ? false : DEFAULT_BROWSER_CONFIG.cookieSync;
   const resolvedProfileDir = resolveManualLoginProfileDir(
     config?.manualLoginProfileDir,
     process.env.ORACLE_BROWSER_PROFILE_DIR,
@@ -128,7 +127,7 @@ export function resolveBrowserConfig(
       config?.autoReattachIntervalMs ?? DEFAULT_BROWSER_CONFIG.autoReattachIntervalMs,
     autoReattachTimeoutMs:
       config?.autoReattachTimeoutMs ?? DEFAULT_BROWSER_CONFIG.autoReattachTimeoutMs,
-    cookieSync: config?.cookieSync ?? cookieSyncDefault,
+    cookieSync: config?.cookieSync ?? DEFAULT_BROWSER_CONFIG.cookieSync,
     cookieNames: config?.cookieNames ?? DEFAULT_BROWSER_CONFIG.cookieNames,
     cookieSyncWaitMs: config?.cookieSyncWaitMs ?? DEFAULT_BROWSER_CONFIG.cookieSyncWaitMs,
     inlineCookies: config?.inlineCookies ?? DEFAULT_BROWSER_CONFIG.inlineCookies,

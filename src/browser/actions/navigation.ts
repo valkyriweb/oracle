@@ -631,6 +631,7 @@ export async function ensurePromptReady(
 export interface ResumedConversationHydrationDeps {
   ensurePromptReady?: typeof ensurePromptReady;
   requirePriorTurns?: boolean;
+  requirePromptReady?: boolean;
   expectedConversationUrl?: string;
 }
 
@@ -692,8 +693,11 @@ export async function waitForResumedConversationHydration(
     priorTurns = turns;
     await delay(250);
   }
-  await delay(1_000); // final settle so React won't wipe the composer after we type
-  await ensureReady(Runtime, timeoutMs, logger);
+  const requirePromptReady = deps.requirePromptReady ?? true;
+  if (requirePromptReady) {
+    await delay(1_000); // final settle so React won't wipe the composer after we type
+    await ensureReady(Runtime, timeoutMs, logger);
+  }
   if ((deps.requirePriorTurns ?? false) && (!settled || priorTurns <= 0)) {
     throw new BrowserAutomationError(
       "Saved ChatGPT conversation did not load stable prior turns; refusing to submit follow-up as a fresh chat.",
@@ -724,7 +728,11 @@ export async function waitForResumedConversationHydration(
       );
     }
   }
-  logger(`[browser] Resumed conversation hydrated (${priorTurns} prior turns); composer settled.`);
+  logger(
+    requirePromptReady
+      ? `[browser] Resumed conversation hydrated (${priorTurns} prior turns); composer settled.`
+      : `[browser] Resumed conversation hydrated (${priorTurns} prior turns).`,
+  );
   return priorTurns;
 }
 

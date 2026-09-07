@@ -153,13 +153,20 @@ describe("isRecoveredConversationHarvestReady", () => {
     ).toBe(false);
   });
 
-  test("accepts a visible stop control while the current answer is running", () => {
+  test("accepts a visible stop control only after the conversation turns hydrate", () => {
+    expect(
+      isRecoveredConversationHarvestReady({
+        stopExists: true,
+        assistantCount: 0,
+        lastUserTurnIndex: 0,
+      }),
+    ).toBe(true);
     expect(
       isRecoveredConversationHarvestReady({
         stopExists: true,
         assistantCount: 0,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

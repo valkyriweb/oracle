@@ -6,6 +6,26 @@ import { DEFAULT_MODEL, MODEL_CONFIGS } from "../src/oracle/config.js";
 describe("resolveRunOptionsFromConfig", () => {
   const basePrompt = "This prompt is comfortably above twenty characters.";
 
+  it.each(["gpt-6", "gpt-6-astra", "astra"])(
+    "keeps %s in browser mode without invoking API resolution",
+    (model) => {
+      expect(
+        resolveRunOptionsFromConfig({
+          prompt: basePrompt,
+          model,
+          userConfig: { engine: "browser" },
+          env: {},
+        }),
+      ).toMatchObject({
+        resolvedEngine: "browser",
+        runOptions: { model: "gpt-6" },
+      });
+      expect(() =>
+        resolveRunOptionsFromConfig({ prompt: basePrompt, model, engine: "api", env: {} }),
+      ).toThrow("browser-only");
+    },
+  );
+
   it("uses config engine when none provided and env lacks OPENAI_API_KEY", () => {
     const { resolvedEngine } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
@@ -432,14 +452,14 @@ describe("resolveRunOptionsFromConfig", () => {
     expect(officialSibling.runOptions.model).toBe("gpt-5.6-luna");
   });
 
-  it("maps browser engine Pro aliases to gpt-5.5-pro", () => {
+  it("maps browser engine Pro aliases to GPT-5.6 Sol", () => {
     const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
       prompt: basePrompt,
       model: "gpt-5.1-pro",
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.5-pro");
+    expect(runOptions.model).toBe("gpt-5.6-sol");
   });
 
   it("maps browser engine gpt-5.4-pro to the current ChatGPT Pro target", () => {
@@ -449,7 +469,7 @@ describe("resolveRunOptionsFromConfig", () => {
       engine: "browser",
     });
     expect(resolvedEngine).toBe("browser");
-    expect(runOptions.model).toBe("gpt-5.5-pro");
+    expect(runOptions.model).toBe("gpt-5.6-sol");
   });
 
   it("keeps gpt-5.4-pro unchanged for API engine runs", () => {

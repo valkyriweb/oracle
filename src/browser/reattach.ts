@@ -10,12 +10,14 @@ import {
   ensureNotBlocked,
   ensureLoggedIn,
   ensurePromptReady,
+  waitForResumedConversationHydration,
 } from "./pageActions.js";
 import type { BrowserLogger, ChromeClient } from "./types.js";
 import {
   launchChrome,
   connectToChrome,
   positionChromeWindowOffscreen,
+  positionChromeWindowOnscreen,
   connectToRemoteChromeTarget,
   listRemoteChromeTargets,
 } from "./chromeLifecycle.js";
@@ -40,6 +42,7 @@ import {
   type TargetInfoLite,
 } from "./reattachHelpers.js";
 import { waitForDeepResearchCompletion } from "./actions/deepResearch.js";
+import { CHROME_COOKIE_SYNC_WARNING, shouldSyncBrowserCookies } from "./policies.js";
 
 export interface ReattachDeps {
   listTargets?: () => Promise<TargetInfoLite[]>;
@@ -47,6 +50,10 @@ export interface ReattachDeps {
   waitForAssistantResponse?: typeof waitForAssistantResponse;
   captureAssistantMarkdown?: typeof captureAssistantMarkdown;
   waitForDeepResearchCompletion?: typeof waitForDeepResearchCompletion;
+  waitForConversationHydration?: typeof waitForResumedConversationHydration;
+  launchChrome?: typeof launchChrome;
+  connectToChrome?: typeof connectToChrome;
+  syncCookies?: typeof syncCookies;
   recoverSession?: (
     runtime: BrowserRuntimeMetadata,
     config: BrowserSessionConfig | undefined,
@@ -174,6 +181,17 @@ export async function resumeBrowserSession(
       "Reattach target did not respond",
     );
     await ensureConversationOpen();
+    const waitForHydration =
+      deps.waitForConversationHydration ?? waitForResumedConversationHydration;
+    const expectedConversationUrl = buildConversationUrl(
+      runtime,
+      resolveBrowserConfig(config ?? {}).url,
+    );
+    await waitForHydration(Runtime, timeoutMs, logger, {
+      requirePriorTurns: true,
+      requirePromptReady: false,
+      expectedConversationUrl: expectedConversationUrl ?? undefined,
+    });
     const minTurnIndex =
       (await readPromptPreviewTurnIndex(Runtime, deps.promptPreview)) ??
       (deps.promptPreview ? null : await readConversationTurnIndex(Runtime, logger));
@@ -263,7 +281,6 @@ function inferPortFromBrowserWSEndpoint(browserWSEndpoint?: string): number | un
   }
   return undefined;
 }
-
 async function resumeBrowserSessionViaNewChrome(
   runtime: BrowserRuntimeMetadata,
   config: BrowserSessionConfig | undefined,
@@ -278,9 +295,37 @@ async function resumeBrowserSessionViaNewChrome(
   if (manualLogin) {
     await mkdir(userDataDir, { recursive: true });
   }
-  const chrome = await launchChrome(resolved, userDataDir, logger);
-  const chromeHost = (chrome as unknown as { host?: string }).host ?? "127.0.0.1";
-  const client = await connectToChrome(chrome.port, logger, chromeHost);
+  const launch = deps.launchChrome ?? launchChrome;
+  const connectToLaunchedChrome = deps.connectToChrome ?? connectToChrome;
+  const chrome = await launch(resolved, userDataDir, logger);
+  const chromeHost =
+    chrome && typeof chrome === "object" && "host" in chrome && typeof chrome.host === "string"
+      ? chrome.host
+      : "127.0.0.1";
+  const client = await connectToLaunchedChrome(chrome.port, logger, chromeHost);
+  const cleanup = async () => {
+    if (client && typeof client.close === "function") {
+      try {
+        await client.close();
+      } catch {
+        // ignore
+      }
+    }
+    if (!resolved.keepBrowser) {
+      try {
+        await chrome.kill();
+      } catch {
+        // ignore
+      }
+      if (manualLogin) {
+        await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "never" }).catch(
+          () => undefined,
+        );
+      } else {
+        await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  };
   const { Network, Page, Runtime, DOM, Target } = client;
 
   if (Runtime?.enable) {
@@ -290,17 +335,28 @@ async function resumeBrowserSessionViaNewChrome(
     await DOM.enable();
   }
   if (!resolved.headless && resolved.hideWindow) {
-    await positionChromeWindowOffscreen(client, logger);
+    await positionChromeWindowOffscreen(client, userDataDir, logger);
+  } else if (!resolved.headless) {
+    await positionChromeWindowOnscreen(client, userDataDir, logger);
   }
   let appliedCookies = 0;
-  if (!manualLogin && resolved.cookieSync) {
-    appliedCookies = await syncCookies(Network, resolved.url, resolved.chromeProfile, logger, {
-      allowErrors: resolved.allowCookieErrors,
-      filterNames: resolved.cookieNames ?? undefined,
-      inlineCookies: resolved.inlineCookies ?? undefined,
-      cookiePath: resolved.chromeCookiePath ?? undefined,
-      waitMs: resolved.cookieSyncWaitMs ?? 0,
-    });
+  if (shouldSyncBrowserCookies(resolved, { manualLogin })) {
+    if (!resolved.inlineCookies) {
+      logger(CHROME_COOKIE_SYNC_WARNING);
+    }
+    const sync = deps.syncCookies ?? syncCookies;
+    try {
+      appliedCookies = await sync(Network, resolved.url, resolved.chromeProfile, logger, {
+        allowErrors: resolved.allowCookieErrors,
+        filterNames: resolved.cookieNames ?? undefined,
+        inlineCookies: resolved.inlineCookies ?? undefined,
+        cookiePath: resolved.chromeCookiePath ?? undefined,
+        waitMs: resolved.cookieSyncWaitMs ?? 0,
+      });
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
   }
 
   await clearStaleChatGptConversationCookies(Network, Target, logger, {
@@ -347,32 +403,15 @@ async function resumeBrowserSessionViaNewChrome(
     await waitForLocationChange(Runtime, 15_000);
   }
 
+  const waitForHydration = deps.waitForConversationHydration ?? waitForResumedConversationHydration;
+  await waitForHydration(Runtime, resolved.inputTimeoutMs, logger, {
+    requirePriorTurns: true,
+    requirePromptReady: false,
+    expectedConversationUrl: conversationUrl ?? undefined,
+  });
   const waitForResponse = deps.waitForAssistantResponse ?? waitForAssistantResponse;
   const captureMarkdown = deps.captureAssistantMarkdown ?? captureAssistantMarkdown;
   const timeoutMs = resolved.timeoutMs ?? 120_000;
-  const cleanup = async () => {
-    if (client && typeof client.close === "function") {
-      try {
-        await client.close();
-      } catch {
-        // ignore
-      }
-    }
-    if (!resolved.keepBrowser) {
-      try {
-        await chrome.kill();
-      } catch {
-        // ignore
-      }
-      if (manualLogin) {
-        await cleanupStaleProfileState(userDataDir, logger, { lockRemovalMode: "never" }).catch(
-          () => undefined,
-        );
-      } else {
-        await rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
-      }
-    }
-  };
   const minTurnIndex =
     (await readPromptPreviewTurnIndex(Runtime, deps.promptPreview)) ??
     (deps.promptPreview ? null : await readConversationTurnIndex(Runtime, logger));
@@ -409,7 +448,6 @@ async function resumeBrowserSessionViaNewChrome(
   const aligned = alignPromptEchoMarkdown(recovered.text, markdown, promptEcho, logger);
 
   await cleanup();
-
   return { answerText: aligned.answerText, answerMarkdown: aligned.answerMarkdown };
 }
 

@@ -104,6 +104,54 @@ function waitForChildOutput(child: CliChild, timeoutMs: number): Promise<void> {
 
 describe("oracle CLI integration", () => {
   test(
+    "routes Astra previews through the browser and rejects API aliases",
+    async () => {
+      const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-astra-cli-"));
+      try {
+        const options = {
+          env: { ...process.env, ORACLE_HOME_DIR: oracleHome },
+          timeout: INTEGRATION_TIMEOUT,
+        };
+        const result = await execCli(
+          [
+            "--engine",
+            "browser",
+            "--model",
+            "gpt-6-astra",
+            "--browser-thinking-time",
+            "pro",
+            "--dry-run",
+            "summary",
+            "-p",
+            "A harmless Astra routing preview.",
+          ],
+          options,
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout).toContain("target=GPT-6 Astra; requested=gpt-6");
+        const api = await execCli(
+          [
+            "--engine",
+            "api",
+            "--model",
+            "gpt-6",
+            "--dry-run",
+            "summary",
+            "-p",
+            "A harmless Astra routing preview.",
+          ],
+          options,
+        );
+        expect(api.code).toBe(1);
+        expect(`${api.stdout}\n${api.stderr}`).toContain("browser-only");
+      } finally {
+        await rm(oracleHome, { recursive: true, force: true });
+      }
+    },
+    INTEGRATION_TIMEOUT,
+  );
+
+  test(
     "exits nonzero when a detached worker receives an unknown session id",
     async () => {
       const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-missing-session-"));
@@ -150,6 +198,60 @@ describe("oracle CLI integration", () => {
         expect(`${result.stdout}\n${result.stderr}`).toContain(
           "--dry-run cannot be combined with --render-markdown.",
         );
+      }
+    },
+    INTEGRATION_TIMEOUT,
+  );
+
+  test(
+    "does not prune stored sessions during a dry-run",
+    async () => {
+      const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-dry-run-retention-"));
+      const oldSessionDir = path.join(oracleHome, "sessions", "old-neutral-session");
+      try {
+        await mkdir(oldSessionDir, { recursive: true });
+        await writeFile(
+          path.join(oldSessionDir, "meta.json"),
+          JSON.stringify({
+            id: "old-neutral-session",
+            createdAt: "2020-01-01T00:00:00.000Z",
+            status: "completed",
+            mode: "browser",
+            options: {},
+          }),
+          "utf8",
+        );
+
+        const result = await execCli(
+          [
+            "--dry-run",
+            "summary",
+            "--retain-hours",
+            "1",
+            "--engine",
+            "browser",
+            "--prompt",
+            "Neutral dry-run retention check",
+          ],
+          {
+            env: {
+              ...process.env,
+              // biome-ignore lint/style/useNamingConvention: env var name
+              ORACLE_HOME_DIR: oracleHome,
+              // biome-ignore lint/style/useNamingConvention: env var name
+              ORACLE_DISABLE_KEYTAR: "1",
+            },
+            timeout: INTEGRATION_TIMEOUT,
+          },
+        );
+
+        expect(result.code).toBe(0);
+        expect(result.stdout).not.toContain("Pruned");
+        await expect(readFile(path.join(oldSessionDir, "meta.json"), "utf8")).resolves.toContain(
+          "old-neutral-session",
+        );
+      } finally {
+        await rm(oracleHome, { recursive: true, force: true });
       }
     },
     INTEGRATION_TIMEOUT,
@@ -431,7 +533,7 @@ module.exports = () => ({
       );
 
       expect(stdout).toContain("[preview] Oracle");
-      expect(stdout).toContain("browser mode (gemini-3.1-pro)");
+      expect(stdout).toContain("browser mode (target=Gemini 3.1 Pro; requested=gemini-3.1-pro)");
 
       await rm(oracleHome, { recursive: true, force: true });
     },
@@ -473,13 +575,13 @@ module.exports = () => ({
           "--prompt",
           "Engine browser route check",
           "--model",
-          "gpt-5.1",
+          "gpt-5.4",
         ],
         { env },
       );
 
       expect(stdout).toContain("[preview] Oracle");
-      expect(stdout).toContain("browser mode (gpt-5.1)");
+      expect(stdout).toContain("browser mode (target=Thinking 5.4; requested=gpt-5.4)");
       expect(stdout).not.toContain("Provider: Azure OpenAI");
 
       await rm(oracleHome, { recursive: true, force: true });
@@ -520,13 +622,13 @@ module.exports = () => ({
           "--prompt",
           "Project browser route check",
           "--model",
-          "gpt-5.1",
+          "gpt-5.4",
         ],
         { env, cwd: repoDir },
       );
 
       expect(stdout).toContain("[preview] Oracle");
-      expect(stdout).toContain("browser mode (gpt-5.1)");
+      expect(stdout).toContain("browser mode (target=Thinking 5.4; requested=gpt-5.4)");
       expect(stdout).not.toContain("Provider: Azure OpenAI");
 
       await rm(oracleHome, { recursive: true, force: true });
@@ -1140,6 +1242,73 @@ module.exports = () => ({
             ORACLE_TEST_REQUIRE_REASONING_EFFORT: "xhigh",
           },
         },
+      );
+      const rerunMetadata = JSON.parse(
+        await readFile(path.join(sessionsDir, sessionId, "meta.json"), "utf8"),
+      );
+      expect(rerunMetadata.status).toBe("completed");
+
+      await rm(oracleHome, { recursive: true, force: true });
+    },
+    INTEGRATION_TIMEOUT,
+  );
+
+  test(
+    "forwards and persists GPT-5.6 Pro reasoning mode",
+    async () => {
+      const oracleHome = await mkdtemp(path.join(os.tmpdir(), "oracle-reasoning-mode-"));
+      const env = {
+        ...process.env,
+        // biome-ignore lint/style/useNamingConvention: env var name
+        OPENAI_API_KEY: "sk-integration",
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_HOME_DIR: oracleHome,
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_CLIENT_FACTORY: CLIENT_FACTORY,
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_NO_DETACH: "1",
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_DISABLE_KEYTAR: "1",
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_TEST_REQUIRE_REASONING_MODE: "pro",
+        // biome-ignore lint/style/useNamingConvention: env var name
+        ORACLE_TEST_REQUIRE_REASONING_EFFORT: "max",
+      };
+
+      await execFileAsync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          CLI_ENTRY,
+          "--engine",
+          "api",
+          "--model",
+          "gpt-5.6-sol",
+          "--reasoning-effort",
+          "max",
+          "--reasoning-mode",
+          "pro",
+          "--no-background",
+          "--wait",
+          "--prompt",
+          "Verify GPT-5.6 Pro reasoning mode",
+        ],
+        { env },
+      );
+
+      const sessionsDir = path.join(oracleHome, "sessions");
+      const [sessionId] = await readdir(sessionsDir);
+      const metadata = JSON.parse(
+        await readFile(path.join(sessionsDir, sessionId, "meta.json"), "utf8"),
+      );
+      expect(metadata.options?.reasoningEffort).toBe("max");
+      expect(metadata.options?.reasoningMode).toBe("pro");
+
+      await execFileAsync(
+        process.execPath,
+        ["--import", "tsx", CLI_ENTRY, "--exec-session", sessionId],
+        { env },
       );
       const rerunMetadata = JSON.parse(
         await readFile(path.join(sessionsDir, sessionId, "meta.json"), "utf8"),

@@ -194,10 +194,10 @@ describe("parseThinkingTimeOption", () => {
     ["extended", "extended"],
     ["high", "extended"],
     ["heavy", "heavy"],
-    ["extra-high", "heavy"],
-    ["extra high", "heavy"],
-    ["extrahigh", "heavy"],
-    ["xhigh", "heavy"],
+    ["extra-high", "extra-high"],
+    ["extra high", "extra-high"],
+    ["extrahigh", "extra-high"],
+    ["xhigh", "extra-high"],
   ] as const)("normalizes %s to %s", (input, expected) => {
     expect(parseThinkingTimeOption(input)).toBe(expected);
   });
@@ -261,6 +261,15 @@ describe("resolveApiModel", () => {
     expect(resolveApiModel("openai/gpt-5.6")).toBe("openai/gpt-5.6");
   });
 
+  test("rejects fake GPT-5.6 Pro model slugs with API-mode guidance", () => {
+    expect(() => resolveApiModel("gpt-5.6-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
+    expect(() => resolveApiModel("gpt-5.6-sol-pro")).toThrow(
+      "Use --model gpt-5.6-sol --reasoning-mode pro",
+    );
+  });
+
   test("passes through unknown names (OpenRouter/custom)", () => {
     expect(resolveApiModel("instant")).toBe("instant");
     expect(resolveApiModel("openai/gpt-5.4")).toBe("openai/gpt-5.4");
@@ -270,6 +279,21 @@ describe("resolveApiModel", () => {
 });
 
 describe("inferModelFromLabel", () => {
+  test.each(["gpt-6", "gpt-6-astra", "GPT-6 Astra", "astra", "ChatGPT 6"])(
+    "resolves browser-only Astra alias %s",
+    (label) => {
+      expect(inferModelFromLabel(label)).toBe("gpt-6");
+      expect(() => resolveApiModel(label)).toThrow("browser-only");
+    },
+  );
+
+  test.each(["gpt-6-pro", "gpt-6-astra-pro", "GPT-6 Luna"])(
+    "rejects ambiguous Astra variant %s",
+    (label) => {
+      expect(() => inferModelFromLabel(label)).toThrow("Unknown GPT-6 browser variant");
+    },
+  );
+
   test("returns canonical names when label already matches", () => {
     expect(inferModelFromLabel("gpt-5.6")).toBe("gpt-5.6");
     expect(inferModelFromLabel("gpt-5.5-pro")).toBe("gpt-5.5-pro");
