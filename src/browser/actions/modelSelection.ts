@@ -8,6 +8,7 @@ import {
 } from "../constants.js";
 import { logDomFailure } from "../domDebug.js";
 import { buildClickDispatcher } from "./domEvents.js";
+import { throwIfThrottled } from "../chatgptThrottle.js";
 import { delay } from "../utils.js";
 
 const LEGACY_PRO_VERSION_WORD_TOKENS = ["5 4", "5 2", "5 1", "5 0", "gpt 5 pro"] as const;
@@ -40,15 +41,35 @@ export async function ensureModelSelection(
   desiredModel: string,
   logger: BrowserLogger,
   strategy: BrowserModelStrategy = "select",
-  options: { buttonWaitMs?: number; buttonPollMs?: number } = {},
+  options: { buttonWaitMs?: number; buttonPollMs?: number; implicitDefault?: boolean } = {},
 ): Promise<BrowserModelSelectionEvidence> {
   const buttonWaitMs = options.buttonWaitMs ?? MODEL_BUTTON_WAIT_MS;
   const buttonPollMs = options.buttonPollMs ?? MODEL_BUTTON_POLL_MS;
-  const deadline = Date.now() + Math.max(0, buttonWaitMs);
+  const probeDeadline = Date.now() + Math.max(0, buttonWaitMs);
+  let deadline: number | undefined;
 
   let result: ModelSelectionResult;
   let announcedWait = false;
   for (;;) {
+    if (options.implicitDefault && strategy === "select") {
+      // Wait for observable selection before a default-driven switch, just as selection waits for the picker.
+      const observed = await Runtime.evaluate({
+        expression: buildModelSelectionExpression(desiredModel, "current"),
+        awaitPromise: true,
+        returnByValue: true,
+      }).catch(() => null);
+      const label = (observed?.result?.value as { label?: unknown } | undefined)?.label;
+      if ((typeof label !== "string" || !label.trim()) && Date.now() < probeDeadline) {
+        await delay(buttonPollMs);
+        continue;
+      }
+      if (typeof label === "string" && isNewerModelLabel(label, desiredModel)) {
+        logger(
+          `[browser] Model selection warning: no model was specified, so Oracle's default will switch ChatGPT from "${label}" to "${desiredModel}" before submission. Pass --model explicitly or --browser-model-strategy current to keep the selected model.`,
+        );
+      }
+    }
+    deadline ??= Date.now() + Math.max(0, buttonWaitMs);
     const outcome = await Runtime.evaluate({
       expression: buildModelSelectionExpression(desiredModel, strategy),
       awaitPromise: true,
@@ -71,23 +92,29 @@ export async function ensureModelSelection(
     case "already-selected":
     case "switched": {
       const observedLabel = result.label?.trim() || null;
-      const label = observedLabel || (strategy === "current" ? null : desiredModel);
-      if (strategy !== "current") {
-        assertResolvedModelSelection(desiredModel, observedLabel ?? "");
+      if (strategy !== "current" && observedLabel !== null) {
+        assertResolvedModelSelection(desiredModel, observedLabel);
       }
-      logger(`Model picker: ${label ?? "current model (label unavailable)"}`);
+      logger(`Model picker: ${observedLabel ?? "current model (label unavailable)"}`);
       return {
         requestedModel: desiredModel,
-        resolvedLabel: label,
+        // A picker target is intent, not observed UI evidence. Keep it separate from the
+        // resolved label so display code cannot turn a fallback into a claimed selection.
+        resolvedLabel: observedLabel,
         strategy,
         status: result.status,
-        verified: strategy !== "current",
+        verified: strategy !== "current" && observedLabel !== null,
         source: "chatgpt-model-picker",
         capturedAt: new Date().toISOString(),
       };
     }
     case "option-not-found": {
       await logDomFailure(Runtime, logger, "model-switcher-option");
+      // Check for a rate-limit notice before blaming the model name. The notice
+      // is a plain dialog, so its "Got it" button reads as an available option to
+      // the menu scrape — which turns "wait a few minutes" into "your model does
+      // not exist", and sends the reader after the wrong bug.
+      await throwIfThrottled(Runtime, { stage: "model-selection" }, logger);
       const isTemporary = result.hint?.temporaryChat ?? false;
       const available = (result.hint?.availableOptions ?? []).filter(Boolean);
       const availableHint = available.length > 0 ? ` Available: ${available.join(", ")}.` : "";
@@ -101,6 +128,7 @@ export async function ensureModelSelection(
     }
     default: {
       await logDomFailure(Runtime, logger, "model-switcher-button");
+      await throwIfThrottled(Runtime, { stage: "model-selection" }, logger);
       throw new Error(
         "Unable to locate the ChatGPT model selector button. If the desired model is already selected in the browser, retry with --browser-model-strategy current; otherwise retry with --browser-model-strategy ignore to skip model selection.",
       );
@@ -108,18 +136,48 @@ export async function ensureModelSelection(
   }
 }
 
+function isNewerModelLabel(current: string, target: string): boolean {
+  const latest = /^(?:Latest|最新|최신)$/i;
+  if (latest.test(current.trim())) {
+    return !latest.test(target.trim()) && target.trim().toLowerCase() !== "gpt-6";
+  }
+  const version = (label: string): [number, number] | null => {
+    const match = label.match(/(?:^|gpt[- ]*|thinking\s+)(\d+)(?:\.(\d+))?/i);
+    return match ? [Number(match[1]), Number(match[2] ?? 0)] : null;
+  };
+  const from = version(current);
+  const to = version(target);
+  return Boolean(from && to && (from[0] > to[0] || (from[0] === to[0] && from[1] > to[1])));
+}
+
 function assertResolvedModelSelection(desiredModel: string, resolvedLabel: string): void {
   const desired = desiredModel.toLowerCase();
   const resolved = resolvedLabel.toLowerCase();
   const normalizedDesired = normalizeResolvedModelLabel(desired);
   const normalizedResolved = normalizeResolvedModelLabel(resolved);
+  if (desired === "gpt-6" || desired === "latest") {
+    // The advanced radio is localized or named GPT-6. Only the documented exact
+    // labels are evidence of GPT-6 Astra; a generic picker result cannot verify the model.
+    if (
+      resolvedLabel.normalize("NFC").trim() === "GPT-6" ||
+      resolvedLabel.normalize("NFC").trim() === "Latest" ||
+      resolvedLabel.normalize("NFC").trim() === "最新" ||
+      resolvedLabel.normalize("NFC").trim() === "최신"
+    ) {
+      return;
+    }
+    throw new Error(
+      `Model picker selected "${resolvedLabel}" while "${desiredModel}" requires GPT-6 Astra.`,
+    );
+  }
   const wantsGpt56Sol =
     /(?:^| )5 6(?: |$)/.test(normalizedDesired) && normalizedDesired.split(" ").includes("sol");
   if (wantsGpt56Sol) {
     const resolvedTokens = normalizedResolved.split(" ");
     if (
       !/(?:^| )5 6(?: |$)/.test(normalizedResolved) ||
-      !resolvedTokens.includes("sol")
+      !resolvedTokens.includes("sol") ||
+      resolvedTokens.includes("pro")
     ) {
       throw new Error(
         `Model picker selected "${resolvedLabel}" while "${desiredModel}" requires GPT-5.6 Sol.`,
@@ -227,6 +285,17 @@ function buildModelSelectionExpression(
     const hasToken = (value, token) => normalizeText(value).split(' ').includes(token);
     // Normalize every candidate token to keep fuzzy matching deterministic.
     const normalizedTarget = normalizeText(PRIMARY_LABEL);
+    // GPT-6 (formerly "Latest") is a radio whose composer pill reads "6 Pro" / "6 High"…,
+    // while GPT-5.6 Sol's reads "5.6 Pro". Declared up front: getResolvedLabel
+    // runs on the picker-less path before the selection helpers below are initialized.
+    const targetIsGpt6 = normalizedTarget === 'gpt 6' || normalizedTarget === 'latest';
+    // Prefer GPT-6 and retain the legacy localized Latest labels (for example, Japanese "最新").
+    // Keep this allow-list exact so GPT-5.6 Sol or an arbitrary localized menu
+    // row can never satisfy a Latest request.
+    const isGpt6ModelLabel = (value) => {
+      const label = String(value ?? '').normalize('NFC').trim();
+      return label === 'GPT-6' || label === 'Latest' || label === '最新' || label === '최신';
+    };
     const normalizedTokens = Array.from(new Set([normalizedTarget, ...LABEL_TOKENS]))
       .map((token) => normalizeText(token))
       .filter(Boolean);
@@ -289,10 +358,24 @@ function buildModelSelectionExpression(
     );
 
     const isVisibleElement = (node) => {
+      if (typeof HTMLElement === 'undefined') return false;
       if (!(node instanceof HTMLElement)) return false;
-      const rect = node.getBoundingClientRect();
-      const style = window.getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      try {
+        const rect = node.getBoundingClientRect?.();
+        const style = window.getComputedStyle?.(node);
+        if (!rect) return true;
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style?.display !== 'none' &&
+          style?.visibility !== 'hidden'
+        );
+      } catch {
+        // DOM test doubles and older Chromium nodes can omit one of these APIs.
+        // Treat them as visible; real hidden picker rows still report a zero rect
+        // or display:none and are filtered above.
+        return true;
+      }
     };
     const looksLikeModelPill = (node) => {
       if (!(node instanceof HTMLElement) || !node.matches('button.__composer-pill')) return false;
@@ -353,16 +436,28 @@ function buildModelSelectionExpression(
       } catch {}
     };
 
-    const getButtonLabel = () => (findModelButton()?.textContent ?? '').trim();
+    // The current composer trigger contains aria-hidden measurement text ("Thinking effort")
+    // before its visible label. Reading textContent would turn a visible "6 Pro"/"Pro" into
+    // "Thinking effortThinking effortPro" and obscure the actual selection.
+    const getButtonLabel = () => {
+      const button = findModelButton();
+      return (button?.innerText ?? button?.textContent ?? '').trim();
+    };
+    // With the picker closed the only evidence for GPT-6 is the composer pill, so its
+    // target must be decided on it: the blank composer signal would otherwise pass as
+    // "already selected" while GPT-5.6 Sol is active. Defined here, before getResolvedLabel, because
+    // the "current" strategy resolves the label before the selection helpers further down exist.
+    const gpt6ButtonSelected = () => {
+      const label = normalizeText(getButtonLabel());
+      return /^(chatgpt |gpt )?6(?: (?:pro|light|standard|extended|heavy|medium|high|extra high))?$/.test(label);
+    };
     const getComposerModelLabel = () =>
       (document.querySelector(COMPOSER_MODEL_SIGNAL_SELECTOR)?.textContent ?? '').trim();
     const readComposerModelSignal = () => normalizeText(getComposerModelLabel());
-    const isIntelligenceEffortLabel = (label) =>
-      label === 'instant' ||
+    const isEffortOnlyLabel = (label) =>
       label === 'medium' ||
       label === 'high' ||
       label === 'extra high' ||
-      label === 'pro' ||
       label === 'extended' ||
       label === 'standard' ||
       label === 'heavy' ||
@@ -450,11 +545,154 @@ function buildModelSelectionExpression(
       }
       return true;
     };
-    const getResolvedLabel = (fallback) => {
+
+    // ---------- Unified Intelligence picker: Advanced -> Model submenu ----------
+    // The slider picker exposes only the current effort in the composer pill. Its
+    // model versions live behind Advanced -> Model, next to an identically-shaped
+    // Effort submenu. Identify the Model opener positively so a Pro effort label can
+    // never be mistaken for a model target.
+    const ADVANCED_VIEW_SELECTOR = '[data-testid="composer-model-picker-slider-advanced-view"]';
+    const INTELLIGENCE_PICKER_SELECTOR = '[data-testid="composer-intelligence-picker-content"]';
+    const SUBMENU_OPENER_SELECTOR = '[role="menuitem"][aria-haspopup="menu"]';
+    const ADVANCED_WORDS = ['advanced', 'erweitert', '高级', '고급', 'avanzado', 'avancado', 'avance'];
+    const MODEL_WORDS = ['model', 'modell', '模型', '모델', 'modelo', 'modello', 'modele'];
+    const EFFORT_WORDS = [
+      'effort', 'aufwand', '强度', '努力', '추론 수준',
+      'esfuerzo', 'esforco', 'sforzo', 'inspanning', 'wysilek',
+    ];
+    const pickerNodeLabel = (node) => {
+      const value =
+        (node?.getAttribute?.('aria-label') ?? '') + ' ' + (node?.textContent ?? '');
+      try {
+        return value
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .normalize('NFC')
+          .replace(/\\s+/g, ' ')
+          .trim();
+      } catch {
+        return value.toLowerCase().replace(/\\s+/g, ' ').trim();
+      }
+    };
+    const containsPickerWord = (label, words) =>
+      words.some((word) => label.includes(word));
+    const isSubmenuOpener = (node) =>
+      node?.getAttribute?.('role') === 'menuitem' &&
+      node?.getAttribute?.('aria-haspopup') === 'menu';
+    const isUnifiedPickerMenu = (menu) =>
+      Boolean(
+        menu?.getAttribute?.('data-testid') === 'composer-intelligence-picker-content' ||
+          menu?.querySelector?.(INTELLIGENCE_PICKER_SELECTOR) ||
+          menu?.querySelector?.(ADVANCED_VIEW_SELECTOR) ||
+          (menu?.querySelector?.('[data-model-picker-view]') &&
+            menu?.getAttribute?.('aria-labelledby') === findModelButton()?.id),
+      );
+    const findUnifiedPickerMenu = () =>
+      Array.from(document.querySelectorAll(${menuContainerLiteral})).find(isUnifiedPickerMenu) ??
+      null;
+    const findAdvancedToggle = (menu) => {
+      const semanticToggle = menu?.querySelector?.('[data-model-picker-view-toggle="true"]');
+      if (semanticToggle && isVisibleElement(semanticToggle)) return semanticToggle;
+      for (const item of (menu || document).querySelectorAll('[role="menuitem"]')) {
+        if (!isVisibleElement(item)) continue;
+        if (containsPickerWord(pickerNodeLabel(item), ADVANCED_WORDS)) return item;
+      }
+      return null;
+    };
+    const findModelSubmenuOpener = (menu) => {
+      const scope = menu?.querySelector?.(ADVANCED_VIEW_SELECTOR) || menu || document;
+      for (const item of scope.querySelectorAll(SUBMENU_OPENER_SELECTOR)) {
+        if (!isVisibleElement(item) || !isSubmenuOpener(item)) continue;
+        const label = pickerNodeLabel(item);
+        if (
+          containsPickerWord(label, MODEL_WORDS) &&
+          !containsPickerWord(label, EFFORT_WORDS)
+        ) {
+          return item;
+        }
+      }
+      return null;
+    };
+    const advancedModelSignalMatchesTarget = (menu = null) => {
+      const parentMenu = menu || findUnifiedPickerMenu();
+      const opener = findModelSubmenuOpener(parentMenu);
+      if (!opener) return false;
+      const label = normalizeText(pickerNodeLabel(opener));
+      const version = versionFromLabel(label);
+      if (desiredVersion && version !== desiredVersion) return false;
+      if (desiredModelVariant && !label.split(' ').includes(desiredModelVariant)) return false;
+      if (wantsPro) return labelHasProWord(label) && !labelHasLegacyProVersion(label);
+      if (wantsInstant) return label.includes('instant');
+      if (wantsThinking) return Boolean(desiredVersion) && !labelHasProWord(label);
+      if (desiredVersion) return true;
+      // GPT-6 and its legacy Latest target must match the radio that is actually checked in the
+      // advanced view: the opener's text lists every radio label, so a substring test would
+      // report GPT-6 as selected while GPT-5.6 Sol is the checked model.
+      const checkedAdvancedRadio = findCheckedAdvancedModelRadio(parentMenu);
+      if (checkedAdvancedRadio) {
+        const checkedLabel = checkedAdvancedRadio.textContent ?? '';
+        return targetIsGpt6
+          ? isGpt6ModelLabel(checkedLabel)
+          : normalizedTokens.some((token) => token && normalizeText(checkedLabel) === token);
+      }
+      return normalizedTokens.some((token) => token && label.includes(token));
+    };
+    const findCheckedAdvancedModelRadio = (menu = null) => {
+      const scope = menu || findUnifiedPickerMenu() || document;
+      return (
+        scope?.querySelector?.(
+          '[data-testid="composer-model-picker-slider-advanced-view"] [role="menuitemradio"][aria-checked="true"]',
+        ) ??
+        scope?.querySelector?.(
+          '[data-model-picker-view] [role="menuitemradio"][aria-checked="true"]',
+        ) ??
+        null
+      );
+    };
+    const getAdvancedModelLabel = () => {
+      const opener = findModelSubmenuOpener(findUnifiedPickerMenu());
+      if (!opener) return '';
+      const raw = (opener.textContent ?? '').trim();
+      const normalized = normalizeText(pickerNodeLabel(opener));
+      const version = versionFromLabel(normalized);
+      if (!version) {
+        const checkedAdvancedRadio = findCheckedAdvancedModelRadio(findUnifiedPickerMenu());
+        const checkedLabel = (checkedAdvancedRadio?.textContent ?? '').trim();
+        return checkedLabel || raw;
+      }
+      const [major, minor] = version.split('-');
+      const suffix = normalized.split(' ').includes('sol') ? ' Sol' : '';
+      return 'GPT-' + major + '.' + minor + suffix;
+    };
+    const isLegacyFlatIntelligencePickerOpen = () => {
+      const menu = findUnifiedPickerMenu();
+      return Boolean(
+        menu &&
+          !menu.querySelector?.(ADVANCED_VIEW_SELECTOR) &&
+          !findAdvancedToggle(menu),
+      );
+    };
+    const getResolvedLabel = (observedOptionLabel = '') => {
+      if (targetIsGpt6) {
+        const checkedAdvancedRadio = findCheckedAdvancedModelRadio();
+        if (checkedAdvancedRadio) return (checkedAdvancedRadio.textContent ?? '').trim();
+        // Picker closed: the pill ("6 Pro") is the evidence; report the radio's name so callers
+        // can compare against the requested target instead of the tier-suffixed pill text.
+        if (gpt6ButtonSelected()) return 'GPT-6';
+        const currentButtonLabel = getButtonLabel();
+        if (currentButtonLabel) return currentButtonLabel;
+        // No picker button at all (e.g. the "current" strategy on a page that hides it): fall back
+        // to the generic composer/observed label resolution below.
+      }
       if (configuredSelectionMatchesTarget()) {
         const variant = getConfiguredVariantLabel();
         const version = formatModelOptionLabel(getConfiguredVersionLabel());
+        if (desiredModelVariant === 'sol' && labelHasProWord(normalizeText(variant))) return version;
         return [variant, version].filter(Boolean).join(' ');
+      }
+      if (advancedModelSignalMatchesTarget()) {
+        return getAdvancedModelLabel();
       }
       const composerLabel = getComposerModelLabel();
       const normalizedComposerLabel = normalizeText(composerLabel);
@@ -464,6 +702,7 @@ function buildModelSelectionExpression(
         versionFromLabel(normalizedComposerLabel) === desiredVersion &&
         normalizedComposerLabel.split(' ').includes(desiredModelVariant)
       ) {
+        if (desiredModelVariant === 'sol' && hasProComposerPill()) return PRIMARY_LABEL;
         return withProPillSignal(composerLabel);
       }
       const buttonLabel = getButtonLabel();
@@ -474,23 +713,21 @@ function buildModelSelectionExpression(
         versionFromLabel(normalizedButton) === desiredVersion &&
         normalizedButton.split(' ').includes(desiredModelVariant)
       ) {
+        if (desiredModelVariant === 'sol' && hasProComposerPill()) return PRIMARY_LABEL;
         return withProPillSignal(buttonLabel);
       }
-      const fallbackLabel = formatModelOptionLabel(fallback);
-      const normalizedFallback = normalizeText(fallbackLabel);
-      if (
-        desiredVersion &&
-        desiredModelVariant &&
-        versionFromLabel(normalizedFallback) === desiredVersion &&
-        normalizedFallback.split(' ').includes(desiredModelVariant)
-      ) {
-        return fallbackLabel;
-      }
-      if (composerLabel) return withProPillSignal(composerLabel);
-      if (fallbackLabel && !wantsPro && isIntelligenceEffortLabel(normalizedButton)) {
-        return fallbackLabel;
-      }
-      return withProPillSignal(buttonLabel || fallbackLabel || fallback);
+      const observedLabel = (label) => {
+        const formatted = formatModelOptionLabel(label);
+        return formatted && !isEffortOnlyLabel(normalizeText(formatted))
+          ? withProPillSignal(formatted)
+          : '';
+      };
+      return (
+        observedLabel(observedOptionLabel) ||
+        observedLabel(composerLabel) ||
+        observedLabel(buttonLabel) ||
+        (wantsPro && hasProComposerPill() ? 'Pro' : '')
+      );
     };
     if (MODEL_STRATEGY === 'current') {
       const currentLabel = getResolvedLabel('') || null;
@@ -515,8 +752,9 @@ function buildModelSelectionExpression(
         desiredVersion === '5-5' &&
         !hasProComposerPill() &&
         isThinkingEffortLabel(normalizedLabel) &&
-        (isNonProIntelligenceThinkingLabel(normalizedLabel) ||
-          isTargetGpt55VisibleAlias(readComposerModelSignal()))
+        (isTargetGpt55VisibleAlias(readComposerModelSignal()) ||
+          (isNonProIntelligenceThinkingLabel(normalizedLabel) &&
+            isLegacyFlatIntelligencePickerOpen()))
       ) {
         return true;
       }
@@ -554,7 +792,11 @@ function buildModelSelectionExpression(
       }
       if (wantsThinking && !normalizedLabel.includes('thinking')) return false;
       // Also reject if button has variants we DON'T want
-      if (!wantsPro && desiredModelVariant !== 'sol' && normalizedLabel.includes(' pro')) return false;
+      if (
+        !wantsPro &&
+        normalizedLabel.includes(' pro') &&
+        !(desiredModelVariant === 'sol' && hasProComposerPill())
+      ) return false;
       if (!wantsInstant && normalizedLabel.includes('instant')) return false;
       if (!wantsThinking && normalizedLabel.includes('thinking')) return false;
       return true;
@@ -571,7 +813,11 @@ function buildModelSelectionExpression(
       if (wantsPro && labelHasLegacyProVersion(signal)) {
         return false;
       }
-      if (COMPOSER_SIGNAL_EXCLUDES.some((token) => token && signal.includes(token))) {
+      if (COMPOSER_SIGNAL_EXCLUDES.some((token) =>
+        token &&
+        signal.includes(token) &&
+        !(token === 'pro' && desiredModelVariant === 'sol' && hasProComposerPill())
+      )) {
         return false;
       }
       if (COMPOSER_SIGNAL_INCLUDES.length === 0) {
@@ -580,6 +826,16 @@ function buildModelSelectionExpression(
       return COMPOSER_SIGNAL_INCLUDES.some((token) => token && signal.includes(token));
     };
     const activeSelectionMatchesTarget = () => {
+      if (targetIsGpt6) {
+        const checkedAdvancedRadio = findCheckedAdvancedModelRadio();
+        if (checkedAdvancedRadio) {
+          return isGpt6ModelLabel(checkedAdvancedRadio.textContent ?? '');
+        }
+        return gpt6ButtonSelected();
+      }
+      if (advancedModelSignalMatchesTarget()) {
+        return true;
+      }
       if (buttonMatchesTarget()) {
         return true;
       }
@@ -602,7 +858,7 @@ function buildModelSelectionExpression(
     };
 
     if (activeSelectionMatchesTarget()) {
-      return { status: 'already-selected', label: getResolvedLabel(PRIMARY_LABEL) };
+      return { status: 'already-selected', label: getResolvedLabel() };
     }
 
     let lastPointerClick = 0;
@@ -627,6 +883,8 @@ function buildModelSelectionExpression(
         node.getAttribute('data-composer-intelligence-pro-effort-action') === 'true' ||
         Boolean(node.closest('[data-model-picker-thinking-effort-action="true"]')) ||
         Boolean(node.closest('[data-composer-intelligence-pro-effort-action="true"]')) ||
+        (isUnifiedPickerMenu(menu) && isSubmenuOpener(node) &&
+          containsPickerWord(pickerNodeLabel(node), EFFORT_WORDS)) ||
         isDetachedProEffortMenu(menu));
     const optionIsSelected = (node) => {
       if (!(node instanceof HTMLElement)) {
@@ -649,6 +907,13 @@ function buildModelSelectionExpression(
 
     const scoreOption = (normalizedText, testid, node) => {
       // Assign a score to every node so we can pick the most likely match without brittle equality checks.
+      // GPT-6 also has legacy localized labels. Match the documented labels
+      // exactly instead of falling through to generic scoring, which could select Sol.
+      if (targetIsGpt6) {
+        if (!isGpt6ModelLabel(node?.textContent ?? '')) return 0;
+        // Prefer the canonical model name when both rollout names are present.
+        return (node.textContent ?? '').trim() === 'GPT-6' ? 2000 : 1900;
+      }
       if (!normalizedText && !testid) {
         return 0;
       }
@@ -962,7 +1227,6 @@ function buildModelSelectionExpression(
         text.includes('instant') ||
         text.includes('thinking') ||
         labelHasProWord(text) ||
-        text.includes('5 6') ||
         text.includes('5 5') ||
         text.includes('5 4') ||
         text.includes('5 2') ||
@@ -1012,6 +1276,9 @@ function buildModelSelectionExpression(
       for (const menu of menus) {
         const buttons = Array.from(menu.querySelectorAll(${menuItemLiteral}));
         for (const option of buttons) {
+          if (!isVisibleElement(option)) {
+            continue;
+          }
           if (isNestedEffortControl(option, menu)) {
             continue;
           }
@@ -1097,6 +1364,33 @@ function buildModelSelectionExpression(
     const openSubmenuOption = (node) => {
       dispatchHoverSequence(node);
       dispatchClickSequence(node);
+    };
+    const descendIntoAdvancedModelPicker = () => {
+      const parentMenu = findUnifiedPickerMenu();
+      if (!parentMenu) return 'unavailable';
+
+      const opener = findModelSubmenuOpener(parentMenu);
+      if (opener) {
+        if (advancedModelSignalMatchesTarget(parentMenu)) {
+          return 'already-selected';
+        }
+        const key = submenuKey(
+          normalizeText(opener.textContent ?? ''),
+          opener.getAttribute?.('data-testid') ?? '',
+        );
+        openedSubmenuKeys.add(key);
+        if (opener.getAttribute?.('aria-expanded') !== 'true') {
+          openSubmenuOption(opener);
+        }
+        return 'opened';
+      }
+
+      const advancedToggle = findAdvancedToggle(parentMenu);
+      if (!advancedToggle) return 'unavailable';
+      if (advancedToggle.getAttribute?.('aria-expanded') !== 'true') {
+        dispatchClickSequence(advancedToggle);
+      }
+      return 'expanded';
     };
 
     return new Promise((resolve) => {
@@ -1184,6 +1478,17 @@ function buildModelSelectionExpression(
           });
           return;
         }
+        const advancedState = descendIntoAdvancedModelPicker();
+        if (advancedState === 'already-selected') {
+          const resolvedLabel = getResolvedLabel();
+          closeMenu();
+          resolve({ status: 'already-selected', label: resolvedLabel });
+          return;
+        }
+        if (advancedState === 'expanded' || advancedState === 'opened') {
+          setTimeout(attempt, REOPEN_INTERVAL_MS / 2);
+          return;
+        }
         if (performance.now() - start > MAX_WAIT_MS) {
           resolve({
             status: 'option-not-found',
@@ -1217,7 +1522,7 @@ function buildComposerSignalMatchers(targetModel: string): ComposerSignalMatcher
     .trim();
 
   if (normalized.includes("5 6")) {
-    return { includesAny: ["5 6 sol"], excludesAny: [], allowBlank: false };
+    return { includesAny: ["5 6 sol"], excludesAny: ["pro"], allowBlank: false };
   }
   if (normalized.includes("pro")) {
     return { includesAny: ["pro"], excludesAny: ["thinking"], allowBlank: false };
@@ -1274,6 +1579,13 @@ function buildModelMatchersLiteral(targetModel: string): {
     testIdTokens.add("gpt-5-6");
     testIdTokens.add("gpt5-6");
     testIdTokens.add("gpt56");
+  }
+  if (base === "gpt-6" || base === "latest") {
+    // Canonical GPT-6 name and exact legacy Latest labels.
+    push("gpt-6", labelTokens);
+    push("latest", labelTokens);
+    push("最新", labelTokens);
+    push("최신", labelTokens);
   }
   // Numeric variations (5.5 <-> 55 <-> gpt-5-5)
   if (base.includes("5.5") || base.includes("5-5") || base.includes("55")) {

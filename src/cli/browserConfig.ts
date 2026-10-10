@@ -1,11 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import chalk from "chalk";
 import type { BrowserSessionConfig } from "../sessionStore.js";
 import type { ModelName, ThinkingTimeLevel } from "../oracle/types.js";
 import { normalizeThinkingTimeLevel } from "../oracle/thinkingTime.js";
 import { CHATGPT_URL, DEFAULT_MODEL_STRATEGY, DEFAULT_MODEL_TARGET } from "../browser/constants.js";
 import { normalizeChatgptUrl } from "../browser/utils.js";
 import { parseDuration } from "../duration.js";
+import { resolveBrowserApprovalWait } from "../browser/config.js";
 import { normalizeBrowserModelStrategy } from "../browser/modelStrategy.js";
 import type {
   BrowserArchiveMode,
@@ -21,14 +23,24 @@ const DEFAULT_BROWSER_ATTACHMENT_TIMEOUT_MS = 45_000;
 const DEFAULT_BROWSER_RECHECK_TIMEOUT_MS = 120_000;
 const DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS = 120_000;
 const DEFAULT_CHROME_PROFILE = "Default";
+const CURRENT_CHATGPT_PRO_ALIASES = new Set([
+  "gpt-5-pro",
+  "gpt-5.1-pro",
+  "gpt-5.2-pro",
+  "gpt-5.4-pro",
+]);
 
 // Ordered array: most specific models first to ensure correct selection.
 // The browser label is passed to the model picker which fuzzy-matches against ChatGPT's UI.
 const BROWSER_MODEL_LABELS: [ModelName, string][] = [
   // Most specific first (e.g., "gpt-5.2-thinking" before "gpt-5.2")
+  // GPT-6 (Astra) is a model radio; GPT-6 Pro selects that radio with Pro power.
+  // The picker also recognizes the legacy Latest labels for older layouts.
+  ["gpt-6-pro", "GPT-6"],
+  ["gpt-6-astra", "GPT-6"],
   ["gpt-5.6-sol", "GPT-5.6 Sol"],
   ["gpt-5.6", "GPT-5.6 Sol"],
-  ["gpt-5.5-pro", "Pro"],
+  ["gpt-5.5-pro", "GPT-5.5"],
   ["gpt-5.5-instant", "GPT-5.5 Instant"],
   ["gpt-5.5", "Thinking 5.5"],
   ["gpt-5.4-pro", "Pro"],
@@ -58,6 +70,7 @@ export interface BrowserFlagOptions {
   browserUrl?: string;
   browserTimeout?: string;
   browserInputTimeout?: string;
+  browserApprovalWait?: string;
   browserAttachmentTimeout?: string;
   browserRecheckDelay?: string;
   browserRecheckTimeout?: string;
@@ -68,6 +81,7 @@ export interface BrowserFlagOptions {
   browserAutoReattachInterval?: string;
   browserAutoReattachTimeout?: string;
   browserCookieWait?: string;
+  browserCookieSync?: boolean;
   browserNoCookieSync?: boolean;
   browserInlineCookiesFile?: string;
   browserCookieNames?: string;
@@ -77,13 +91,17 @@ export interface BrowserFlagOptions {
   browserKeepBrowser?: boolean;
   browserManualLogin?: boolean;
   browserManualLoginProfileDir?: string | null;
+  browserManualLoginCookieSync?: boolean;
   copyProfile?: string;
   remoteHost?: string;
-  /** Thinking time intensity: 'light', 'standard', 'extended', 'heavy' */
+  /** Thinking time intensity: 'light', 'standard', 'extended', 'extra-high', 'pro', 'heavy' */
   browserThinkingTime?: ThinkingTimeLevel;
   browserResearch?: BrowserResearchMode;
   browserArchive?: BrowserArchiveMode;
+  browserCaptureProviderNative?: boolean;
   browserModelLabel?: string;
+  /** Original model request before browser alias normalization. */
+  browserRequestedModel?: ModelName;
   browserModelStrategy?: BrowserModelStrategy;
   browserAllowCookieErrors?: boolean;
   remoteChrome?: string;
@@ -95,6 +113,13 @@ export interface BrowserFlagOptions {
 
 export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
   const normalized = model.toLowerCase() as ModelName;
+  // Browser-only alias: gpt-6-pro keeps its name so the Pro tier default survives (label "GPT-6").
+  if (isGpt6ProAlias(normalized)) {
+    return "gpt-6-pro" as ModelName;
+  }
+  if (isGpt6Alias(normalized)) {
+    return "gpt-6-astra";
+  }
   if (!normalized.startsWith("gpt-") || normalized.includes("codex")) {
     return model;
   }
@@ -111,13 +136,8 @@ export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
   }
 
   // Pro variants: resolve to the latest Pro model in ChatGPT.
-  if (
-    normalized === "gpt-5-pro" ||
-    normalized === "gpt-5.1-pro" ||
-    normalized === "gpt-5.2-pro" ||
-    normalized === "gpt-5.4-pro"
-  ) {
-    return "gpt-5.5-pro";
+  if (isCurrentChatGptProAlias(normalized)) {
+    return "gpt-5.6-sol";
   }
 
   // Explicit model variants: keep as-is (they have their own browser labels)
@@ -131,6 +151,45 @@ export function normalizeChatGptModelForBrowser(model: ModelName): ModelName {
   }
 
   return model;
+}
+
+// Documented spellings only: gpt-6, gpt-6-astra, gpt-6-pro (plus their label forms such as
+// "GPT-6 Pro") and "latest" map to ChatGPT's "GPT-6" model. Any other gpt-6-* id (gpt-6-codex,
+// gpt-6-custom, ...) is not an alias and must pass through unchanged for custom/OpenRouter use.
+const GPT6_ALIAS_PATTERN = /^gpt[-_ ]?6(?:[-_ ](?:astra|pro))?$/;
+const GPT6_PRO_ALIAS_PATTERN = /^gpt[-_ ]?6[-_ ]pro$/;
+
+export function isGpt6Alias(model: string | undefined): boolean {
+  const normalized = model?.trim().toLowerCase() ?? "";
+  return normalized === "latest" || GPT6_ALIAS_PATTERN.test(normalized);
+}
+
+export function isGpt6ProAlias(model: string | undefined): boolean {
+  return GPT6_PRO_ALIAS_PATTERN.test(model?.trim().toLowerCase() ?? "");
+}
+
+export function isCurrentChatGptProAlias(model: string | undefined): boolean {
+  return CURRENT_CHATGPT_PRO_ALIASES.has(model?.trim().toLowerCase() ?? "");
+}
+
+export function resolveDefaultBrowserThinkingTime({
+  model,
+  requestedModel,
+  modelStrategy,
+}: {
+  model: string;
+  requestedModel?: string;
+  modelStrategy?: BrowserModelStrategy;
+}): ThinkingTimeLevel | undefined {
+  const strategy = normalizeBrowserModelStrategy(modelStrategy) ?? DEFAULT_MODEL_STRATEGY;
+  if (strategy !== "select") return undefined;
+  const normalizedModel = normalizeChatGptModelForBrowser(model as ModelName);
+  return isCurrentChatGptProAlias(requestedModel ?? model) ||
+    isGpt6ProAlias(requestedModel ?? model) ||
+    normalizedModel === "gpt-6-pro" ||
+    normalizedModel === "gpt-5.5-pro"
+    ? "pro"
+    : undefined;
 }
 
 export async function buildBrowserConfig(
@@ -164,6 +223,14 @@ export async function buildBrowserConfig(
     !isChatGptModel && normalizedOverride.length > 0 && normalizedOverride !== baseModel;
   const modelStrategy =
     normalizeBrowserModelStrategy(options.browserModelStrategy) ?? DEFAULT_MODEL_STRATEGY;
+  const thinkingTime =
+    normalizeThinkingTimeLevel(options.browserThinkingTime) ??
+    resolveDefaultBrowserThinkingTime({
+      model: options.model,
+      requestedModel: options.browserRequestedModel,
+      modelStrategy,
+    });
+  assertBrowserModelAvailable(options.model, modelStrategy);
   const cookieNames = parseCookieNames(
     options.browserCookieNames ?? process.env.ORACLE_BROWSER_COOKIE_NAMES,
   );
@@ -174,7 +241,10 @@ export async function buildBrowserConfig(
     envFile: process.env.ORACLE_BROWSER_COOKIES_FILE,
     cwd: process.cwd(),
   });
-  if (inline?.source?.startsWith("home:") && options.browserNoCookieSync !== true) {
+  const chromeCookieSyncRequested =
+    options.browserNoCookieSync !== true &&
+    (options.browserCookieSync === true || options.browserManualLoginCookieSync === true);
+  if (inline?.source?.startsWith("home:") && chromeCookieSyncRequested) {
     inline = undefined;
   }
 
@@ -206,47 +276,79 @@ export async function buildBrowserConfig(
     url,
     debugPort: selectBrowserPort(options),
     timeoutMs: options.browserTimeout
-      ? parseDuration(options.browserTimeout, DEFAULT_BROWSER_TIMEOUT_MS)
+      ? parseBrowserDuration(
+          options.browserTimeout,
+          "--browser-timeout",
+          DEFAULT_BROWSER_TIMEOUT_MS,
+        )
       : undefined,
     inputTimeoutMs: options.browserInputTimeout
-      ? parseDuration(options.browserInputTimeout, DEFAULT_BROWSER_INPUT_TIMEOUT_MS)
+      ? parseBrowserDuration(
+          options.browserInputTimeout,
+          "--browser-input-timeout",
+          DEFAULT_BROWSER_INPUT_TIMEOUT_MS,
+        )
       : undefined,
+    approvalWaitMs: resolveBrowserApprovalWait(options.browserApprovalWait),
     attachmentTimeoutMs: options.browserAttachmentTimeout
-      ? parseDuration(options.browserAttachmentTimeout, DEFAULT_BROWSER_ATTACHMENT_TIMEOUT_MS)
+      ? parseBrowserDuration(
+          options.browserAttachmentTimeout,
+          "--browser-attachment-timeout",
+          DEFAULT_BROWSER_ATTACHMENT_TIMEOUT_MS,
+        )
       : undefined,
     assistantRecheckDelayMs: options.browserRecheckDelay
-      ? parseDuration(options.browserRecheckDelay, 0)
+      ? parseBrowserDuration(options.browserRecheckDelay, "--browser-recheck-delay", 0)
       : undefined,
     assistantRecheckTimeoutMs: options.browserRecheckTimeout
-      ? parseDuration(options.browserRecheckTimeout, DEFAULT_BROWSER_RECHECK_TIMEOUT_MS)
+      ? parseBrowserDuration(
+          options.browserRecheckTimeout,
+          "--browser-recheck-timeout",
+          DEFAULT_BROWSER_RECHECK_TIMEOUT_MS,
+        )
       : undefined,
     reuseChromeWaitMs: options.browserReuseWait
-      ? parseDuration(options.browserReuseWait, 0)
+      ? parseBrowserDuration(options.browserReuseWait, "--browser-reuse-wait", 0)
       : undefined,
     profileLockTimeoutMs: options.browserProfileLockTimeout
-      ? parseDuration(options.browserProfileLockTimeout, 0)
+      ? parseBrowserDuration(options.browserProfileLockTimeout, "--browser-profile-lock-timeout", 0)
       : undefined,
     maxConcurrentTabs: parseMaxConcurrentTabs(options.browserMaxConcurrentTabs),
     autoReattachDelayMs: options.browserAutoReattachDelay
-      ? parseDuration(options.browserAutoReattachDelay, 0)
+      ? parseBrowserDuration(options.browserAutoReattachDelay, "--browser-auto-reattach-delay", 0)
       : undefined,
     autoReattachIntervalMs: options.browserAutoReattachInterval
-      ? parseDuration(options.browserAutoReattachInterval, 0)
+      ? parseBrowserDuration(
+          options.browserAutoReattachInterval,
+          "--browser-auto-reattach-interval",
+          0,
+        )
       : undefined,
     autoReattachTimeoutMs: options.browserAutoReattachTimeout
-      ? parseDuration(options.browserAutoReattachTimeout, DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS)
+      ? parseBrowserDuration(
+          options.browserAutoReattachTimeout,
+          "--browser-auto-reattach-timeout",
+          DEFAULT_BROWSER_AUTO_REATTACH_TIMEOUT_MS,
+        )
       : undefined,
     cookieSyncWaitMs: options.browserCookieWait
-      ? parseDuration(options.browserCookieWait, 0)
+      ? parseBrowserDuration(options.browserCookieWait, "--browser-cookie-wait", 0)
       : undefined,
-    cookieSync: options.browserNoCookieSync ? false : undefined,
+    cookieSync: inline?.cookies?.length
+      ? true
+      : options.browserNoCookieSync
+        ? false
+        : options.browserCookieSync === true || options.browserManualLoginCookieSync === true
+          ? true
+          : undefined,
     cookieNames,
     inlineCookies: inline?.cookies,
     inlineCookiesSource: inline?.source ?? null,
-    headless: undefined, // disable headless; Cloudflare blocks it
+    headless: options.browserHeadless === true ? true : undefined,
     keepBrowser: options.browserKeepBrowser ? true : undefined,
     manualLogin: options.browserManualLogin === undefined ? undefined : options.browserManualLogin,
     manualLoginProfileDir: options.browserManualLoginProfileDir ?? undefined,
+    manualLoginCookieSync: inline?.cookies?.length ? true : options.browserManualLoginCookieSync,
     copyProfileSource: options.copyProfile ?? undefined,
     hideWindow: options.browserHideWindow ? true : undefined,
     desiredModel,
@@ -256,10 +358,29 @@ export async function buildBrowserConfig(
     allowCookieErrors: options.browserAllowCookieErrors ?? true,
     remoteChrome,
     browserTabRef: options.browserTab ?? undefined,
-    thinkingTime: normalizeThinkingTimeLevel(options.browserThinkingTime) ?? undefined,
-    researchMode: options.browserResearch === "deep" ? "deep" : "off",
+    thinkingTime,
+    researchMode:
+      options.browserResearch === "deep" || options.browserResearch === "search"
+        ? options.browserResearch
+        : "off",
     archiveConversations: options.browserArchive,
+    captureProviderNative: options.browserCaptureProviderNative,
   };
+}
+
+function assertBrowserModelAvailable(model: ModelName, modelStrategy: BrowserModelStrategy): void {
+  if (modelStrategy !== "select") return;
+  const normalized = normalizeChatGptModelForBrowser(model);
+  if (
+    normalized !== "gpt-5.2" &&
+    normalized !== "gpt-5.2-instant" &&
+    normalized !== "gpt-5.2-thinking"
+  ) {
+    return;
+  }
+  throw new Error(
+    `Browser model "${model}" is retired because ChatGPT no longer offers GPT-5.2 base, Instant, or Thinking. Choose a current GPT-5.5/GPT-5.6 browser model, use --browser-model-strategy current to keep ChatGPT's active model, or use --engine api to retain the GPT-5.2 API alias.`,
+  );
 }
 
 function validateAttachRunningOptions(
@@ -278,7 +399,9 @@ function validateAttachRunningOptions(
   const conflicts = [
     options.browserChromeProfile ? "--browser-chrome-profile" : null,
     options.browserCookiePath ? "--browser-cookie-path" : null,
+    options.browserCookieSync ? "--browser-cookie-sync" : null,
     options.browserNoCookieSync ? "--browser-no-cookie-sync" : null,
+    options.browserHeadless ? "--browser-headless" : null,
     options.browserHideWindow ? "--browser-hide-window" : null,
     options.browserKeepBrowser ? "--browser-keep-browser" : null,
     options.browserManualLogin ? "--browser-manual-login" : null,
@@ -315,6 +438,17 @@ function parseMaxConcurrentTabs(raw?: string): number | undefined {
   return Math.trunc(value);
 }
 
+function parseBrowserDuration(raw: string, optionName: string, fallbackMs: number): number {
+  const parsed = parseDuration(raw, Number.NaN);
+  if (Number.isFinite(parsed)) return parsed;
+  console.log(
+    chalk.yellow(
+      `Warning: invalid ${optionName} duration "${raw}"; using fallback ${fallbackMs}ms.`,
+    ),
+  );
+  return fallbackMs;
+}
+
 export function mapModelToBrowserLabel(model: ModelName): string {
   const normalized = normalizeChatGptModelForBrowser(model);
   // Iterate ordered array to find first match (most specific first)
@@ -332,13 +466,17 @@ export function resolveBrowserModelLabel(input: string | undefined, model: Model
     return mapModelToBrowserLabel(model);
   }
   const normalizedInput = trimmed.toLowerCase();
-  if (normalizedInput === model.toLowerCase()) {
+  if (
+    normalizedInput === model.toLowerCase() ||
+    (isGpt6Alias(normalizedInput) && (model === "gpt-6-astra" || model === "gpt-6-pro")) ||
+    (isGpt6ProAlias(normalizedInput) && model === "gpt-6-pro")
+  ) {
     return mapModelToBrowserLabel(model);
   }
   return trimmed;
 }
 
-function parseRemoteChromeTarget(raw: string): { host: string; port: number } {
+export function parseRemoteChromeTarget(raw: string): { host: string; port: number } {
   const target = raw.trim();
   if (!target) {
     throw new Error(

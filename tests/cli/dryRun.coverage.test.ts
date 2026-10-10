@@ -62,6 +62,38 @@ describe("runDryRunSummary", () => {
     expect(joined).toContain("Cookies: inline payload (1) via test");
   });
 
+  test("browser dry run distinguishes its picker target from the requested model key", async () => {
+    const log = vi.fn();
+    const assembleBrowserPromptImpl = vi.fn().mockResolvedValue({
+      markdown: "[USER]",
+      composerText: "Do it",
+      estimatedInputTokens: 42,
+      attachments: [],
+      inlineFileCount: 0,
+      tokenEstimateIncludesInlineFiles: false,
+      attachmentsPolicy: "auto",
+      attachmentMode: "inline",
+      fallback: null,
+      bundled: null,
+    });
+
+    await runDryRunSummary(
+      {
+        engine: "browser",
+        runOptions: { ...baseRunOptions, model: "gpt-5.6" },
+        cwd: "/repo",
+        version: "0.15.2",
+        log,
+        browserConfig: { desiredModel: "GPT-5.6 Sol" },
+      },
+      { assembleBrowserPromptImpl },
+    );
+
+    expect(log.mock.calls.flat().join("\n")).toContain(
+      "browser mode (target=GPT-5.6 Sol; requested=gpt-5.6)",
+    );
+  });
+
   test("browser dry run falls back to inline composer summary when no attachments", async () => {
     const log = vi.fn();
     const assembleBrowserPromptImpl = vi.fn().mockResolvedValue({
@@ -94,7 +126,7 @@ describe("runDryRunSummary", () => {
     expect(joined).toContain("cookie-sync");
   });
 
-  test("browser dry run shows default cookie copy when none provided and no files attached", async () => {
+  test("browser dry run shows cookie copy disabled by default", async () => {
     const log = vi.fn();
     const assembleBrowserPromptImpl = vi.fn().mockResolvedValue({
       markdown: "[SYSTEM]\n[USER]",
@@ -122,7 +154,7 @@ describe("runDryRunSummary", () => {
     );
 
     const joined = log.mock.calls.flat().join("\n");
-    expect(joined).toContain("Cookies: copy from Chrome");
+    expect(joined).toContain("Cookies: Chrome copy disabled");
     expect(joined).toContain("No files attached");
   });
 
@@ -154,6 +186,7 @@ describe("runDryRunSummary", () => {
     );
     let joined = log.mock.calls.flat().join("\n");
     expect(joined).toContain("Browser control: attach to an already-running local Chrome session");
+    expect(joined).toContain("Cookies: Chrome copy disabled");
     expect(joined).toContain("Preview JSON");
     expect(joined).toContain('"composerText": "Preview text"');
 

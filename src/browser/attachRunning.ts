@@ -1,6 +1,8 @@
 import type { BrowserLogger, ResolvedBrowserConfig } from "./types.js";
 import {
   discoverDevToolsActivePortCandidates,
+  formatWebSocketHost,
+  resolveDevToolsActivePortDiscoveryRoots,
   type DevToolsActivePortCandidate,
 } from "./detect.js";
 
@@ -8,7 +10,7 @@ export interface AttachRunningConnectionInfo {
   host: string;
   port: number;
   browserWSEndpoint: string;
-  profileRoot: string;
+  profileRoot: string | null;
 }
 
 export async function resolveAttachRunningConnection(
@@ -31,11 +33,28 @@ export async function resolveAttachRunningConnection(
     .filter((candidate) => candidate.port === port)
     .sort(compareDevToolsCandidates);
 
+  const probe = await probeDevToolsBrowserWSEndpoint({ host, port });
+  if (probe.ok) {
+    const matching = candidates.find(
+      (candidate) => candidate.browserWSEndpoint === probe.browserWSEndpoint,
+    );
+    if (candidates.length > 0 && candidates[0].browserWSEndpoint !== probe.browserWSEndpoint) {
+      logger("Ignoring stale attach-running metadata; using the live browser endpoint.");
+    }
+    return {
+      host,
+      port,
+      browserWSEndpoint: probe.browserWSEndpoint,
+      profileRoot: matching?.profileRoot ?? null,
+    };
+  }
   if (candidates.length === 0) {
+    const discoveryRoots = resolveDevToolsActivePortDiscoveryRoots();
     throw new Error(
-      `No running browser with attach metadata matched ${host}:${port}. Enable remote debugging in chrome://inspect/#remote-debugging first.`,
+      `No running browser matched ${host}:${port}. DevToolsActivePort discovery searched ${discoveryRoots.join(", ") || "no roots"}, and endpoint probe http://${formatWebSocketHost(host)}:${port}/json/version failed: ${probe.error}.`,
     );
   }
+  // Chrome's remote-debugging toggle can expose metadata without classic HTTP discovery.
   const candidate = candidates[0];
   logger(`Selected attach-running browser metadata from ${candidate.path}`);
   return {
@@ -44,6 +63,49 @@ export async function resolveAttachRunningConnection(
     browserWSEndpoint: candidate.browserWSEndpoint,
     profileRoot: candidate.profileRoot,
   };
+}
+
+async function probeDevToolsBrowserWSEndpoint({
+  host,
+  port,
+  attempts = 2,
+  timeoutMs = 1000,
+}: {
+  host: string;
+  port: number;
+  attempts?: number;
+  timeoutMs?: number;
+}): Promise<{ ok: true; browserWSEndpoint: string } | { ok: false; error: string }> {
+  const versionUrl = `http://${formatWebSocketHost(host)}:${port}/json/version`;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(versionUrl, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const version = (await response.json()) as { webSocketDebuggerUrl?: unknown };
+        if (typeof version.webSocketDebuggerUrl !== "string" || !version.webSocketDebuggerUrl) {
+          throw new Error("response did not include webSocketDebuggerUrl");
+        }
+        return { ok: true, browserWSEndpoint: version.webSocketDebuggerUrl };
+      } finally {
+        // Headers can arrive before a stalled body; bound and clean up the whole request.
+        clearTimeout(timeout);
+        controller.abort();
+      }
+    } catch (error) {
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: message };
+    }
+  }
+  return { ok: false, error: "unreachable" };
 }
 
 function compareDevToolsCandidates(

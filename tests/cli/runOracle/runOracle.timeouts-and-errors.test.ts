@@ -52,6 +52,32 @@ describe("timeouts", () => {
     );
   });
 
+  test("GPT-5.6 Pro reasoning mode uses the long auto timeout", async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const captured: Array<{ httpTimeoutMs?: number }> = [];
+
+    await runOracle(
+      {
+        prompt: "Verify the GPT-5.6 Pro timeout policy",
+        model: "gpt-5.6-sol",
+        reasoningMode: "pro",
+        background: false,
+      },
+      {
+        apiKey: "sk-test",
+        clientFactory: (_apiKey, options) => {
+          captured.push({ httpTimeoutMs: options?.httpTimeoutMs });
+          return client;
+        },
+        log: () => {},
+        write: () => true,
+      },
+    );
+
+    expect(captured).toEqual([{ httpTimeoutMs: 3_600_000 }]);
+  });
+
   test("derives HTTP timeout from explicit overall timeout", async () => {
     const stream = new MockStream([], buildResponse());
     const client = new MockClient(stream);

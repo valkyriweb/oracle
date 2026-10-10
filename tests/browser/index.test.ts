@@ -8,7 +8,6 @@ import {
   formatBrowserTurnTranscript,
   isLocalChromeHostForTest,
   maybeArchiveCompletedConversationForTest,
-  redactBrowserConfigForDebugLogForTest,
   resolveRemoteTabLeaseProfileDirForTest,
   runBrowserMode,
   runSubmissionWithRecoveryForTest,
@@ -16,7 +15,47 @@ import {
   shouldPreserveBrowserOnErrorForTest,
 } from "../../src/browser/index.js";
 import { resolveBrowserConfig } from "../../src/browser/config.js";
+import { redactBrowserConfigForDebugLog } from "../../src/browser/configLogging.js";
 import { BrowserAutomationError } from "../../src/oracle/errors.js";
+
+describe("generated image response failures", () => {
+  test("completes image generation when a detached gallery appears without answer text", async () => {
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => ({
+      result: {
+        value: expression.includes("const isGeneratedImage")
+          ? [{ url: "blob:https://chatgpt.com/00000000-0000-4000-8000-000000000001", width: 1024 }]
+          : { text: "Edit", turnIndex: 2 },
+      },
+    }));
+    await expect(
+      __test__.pollGeneratedImageOrTextAssistantResponse({ evaluate } as never, 100, 2),
+    ).resolves.toMatchObject({ text: "Generated image" });
+  });
+
+  test("rejects a current Retry failure instead of accepting its text as an image answer", async () => {
+    const evaluate = vi.fn().mockResolvedValue({
+      result: {
+        value: {
+          text: "Something went wrong while generating the response.",
+          turnIndex: 2,
+          uiError: "temporary_unavailable",
+        },
+      },
+    });
+    await expect(
+      __test__.pollGeneratedImageOrTextAssistantResponse(
+        { evaluate } as unknown as Parameters<
+          typeof __test__.pollGeneratedImageOrTextAssistantResponse
+        >[0],
+        30_000,
+        2,
+      ),
+    ).rejects.toMatchObject({
+      details: { stage: "assistant-ui-error", code: "chatgpt-ui-warning" },
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+});
 
 describe("shouldPreserveBrowserOnErrorForTest", () => {
   test("preserves the browser for headful cloudflare challenge errors", () => {
@@ -40,11 +79,16 @@ describe("shouldPreserveBrowserOnErrorForTest", () => {
     const recheck = new BrowserAutomationError("assistant recheck failed", {
       stage: "assistant-recheck",
     });
+    const uiError = new BrowserAutomationError("assistant failed", {
+      stage: "assistant-ui-error",
+    });
 
     expect(shouldPreserveBrowserOnErrorForTest(timeout, false)).toBe(true);
     expect(shouldPreserveBrowserOnErrorForTest(recheck, false)).toBe(true);
+    expect(shouldPreserveBrowserOnErrorForTest(uiError, false)).toBe(true);
     expect(classifyPreservedBrowserErrorForTest(timeout, false)).toBe("reattachable-capture");
     expect(classifyPreservedBrowserErrorForTest(recheck, false)).toBe("reattachable-capture");
+    expect(classifyPreservedBrowserErrorForTest(uiError, false)).toBe("reattachable-capture");
   });
 
   test("does not preserve assistant capture errors in headless mode", () => {
@@ -70,6 +114,21 @@ describe("shouldPreserveBrowserOnErrorForTest", () => {
     });
 
     expect(classifyPreservedBrowserErrorForTest(error, false)).toBe("cloudflare-challenge");
+  });
+});
+
+describe("authenticated model-selection errors", () => {
+  test("preserves picker diagnostics without adding cookie guidance", () => {
+    const error = new BrowserAutomationError(
+      'Unable to find model option matching "GPT-5.2 Instant". Available: GPT-5.6 Sol.',
+      { stage: "model-selection" },
+    );
+
+    const normalized = __test__.normalizeAuthenticatedModelSelectionError(error);
+
+    expect(normalized).toBe(error);
+    expect(normalized.message).toContain("Available: GPT-5.6 Sol");
+    expect(normalized.message).not.toMatch(/cookies|log in/i);
   });
 });
 
@@ -196,9 +255,170 @@ describe("browser run target cleanup", () => {
       }),
     ).toBe(false);
   });
+
+  test("keeps shared Chrome alive when another tab lease remains", async () => {
+    const terminateSharedChrome = vi.fn(async () => true);
+    const closeOwnedRunTarget = vi.fn(async () => undefined);
+    const cleanupBlankTabs = vi.fn(async () => undefined);
+    const logger = vi.fn();
+    const lease = {
+      id: "lease-one",
+      update: vi.fn(async () => undefined),
+      release: vi.fn(async ({ onRelease }) => {
+        await onRelease?.({ isLastLease: false });
+      }),
+    };
+
+    const result = await __test__.releaseLocalBrowserTabLease({
+      lease,
+      closeOwnedRunTarget,
+      cleanupBlankTabs,
+      terminateSharedChrome,
+      logger,
+    });
+
+    expect(result).toEqual({ keepBrowserOpen: true, terminationHandled: false });
+    expect(closeOwnedRunTarget).toHaveBeenCalledOnce();
+    expect(cleanupBlankTabs).not.toHaveBeenCalled();
+    expect(terminateSharedChrome).not.toHaveBeenCalled();
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("Other ChatGPT tab leases"));
+  });
+
+  test("terminates shared Chrome only inside the final tab lease release", async () => {
+    const order: string[] = [];
+    const logger = vi.fn();
+    const lease = {
+      id: "lease-last",
+      update: vi.fn(async () => undefined),
+      release: vi.fn(async ({ onRelease }) => {
+        order.push("release-start");
+        await onRelease?.({ isLastLease: true });
+        order.push("release-finish");
+      }),
+    };
+
+    const result = await __test__.releaseLocalBrowserTabLease({
+      lease,
+      closeOwnedRunTarget: async () => {
+        order.push("close-target");
+      },
+      cleanupBlankTabs: async () => {
+        order.push("cleanup-blank");
+      },
+      terminateSharedChrome: async () => {
+        order.push("terminate-chrome");
+        return true;
+      },
+      logger,
+    });
+
+    expect(result).toEqual({ keepBrowserOpen: false, terminationHandled: true });
+    expect(order).toEqual([
+      "release-start",
+      "close-target",
+      "cleanup-blank",
+      "terminate-chrome",
+      "release-finish",
+    ]);
+  });
+
+  test("fails closed when final shared Chrome termination cannot be verified", async () => {
+    const logger = vi.fn();
+    const lease = {
+      id: "lease-last-failed-termination",
+      update: vi.fn(async () => undefined),
+      release: vi.fn(async ({ onRelease }) => {
+        await onRelease?.({ isLastLease: true });
+      }),
+    };
+
+    const result = await __test__.releaseLocalBrowserTabLease({
+      lease,
+      closeOwnedRunTarget: async () => undefined,
+      cleanupBlankTabs: async () => undefined,
+      terminateSharedChrome: async () => false,
+      logger,
+    });
+
+    expect(result).toEqual({ keepBrowserOpen: true, terminationHandled: false });
+    expect(logger).toHaveBeenCalledWith(
+      expect.stringContaining("Could not verify shared Chrome termination"),
+    );
+  });
+
+  test("surfaces a registry unlock failure after final-lease cleanup succeeds", async () => {
+    const logger = vi.fn();
+    const releaseFailure = new Error("registry lock removal exhausted");
+    const lease = {
+      id: "lease-last-unlock-failure",
+      update: vi.fn(async () => undefined),
+      release: vi.fn(async ({ onRelease }) => {
+        await onRelease?.({ isLastLease: true });
+        throw releaseFailure;
+      }),
+    };
+
+    const result = await __test__.releaseLocalBrowserTabLease({
+      lease,
+      closeOwnedRunTarget: async () => undefined,
+      cleanupBlankTabs: async () => undefined,
+      terminateSharedChrome: async () => true,
+      logger,
+    });
+
+    expect(result).toEqual({
+      keepBrowserOpen: false,
+      terminationHandled: true,
+      releaseError: releaseFailure,
+    });
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("restart Oracle/Codex MCP"));
+  });
+
+  test("fails closed when the tab lease release decision is unavailable", async () => {
+    const terminateSharedChrome = vi.fn(async () => true);
+    const logger = vi.fn();
+    const lease = {
+      id: "lease-unknown",
+      update: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
+    };
+
+    const result = await __test__.releaseLocalBrowserTabLease({
+      lease,
+      closeOwnedRunTarget: async () => undefined,
+      cleanupBlankTabs: async () => undefined,
+      terminateSharedChrome,
+      logger,
+    });
+
+    expect(result).toEqual({ keepBrowserOpen: true, terminationHandled: false });
+    expect(terminateSharedChrome).not.toHaveBeenCalled();
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("Could not verify final"));
+  });
 });
 
 describe("manual-login profile setup gate", () => {
+  test("announces missing login and reveals the window before retrying", async () => {
+    const evaluate = vi
+      .fn()
+      .mockResolvedValueOnce({ result: { value: { ok: false, domLoginCta: true } } })
+      .mockResolvedValueOnce({ result: { value: { clicked: false, reason: "not-found" } } })
+      .mockResolvedValue({ result: { value: { ok: true } } });
+    const logger = vi.fn();
+    const onLoginRequired = vi.fn(async () => {});
+    await __test__.waitForLogin({
+      runtime: { evaluate } as never,
+      logger,
+      appliedCookies: 0,
+      manualLogin: true,
+      timeoutMs: 5000,
+      keepBrowser: false,
+      onLoginRequired,
+    });
+    expect(onLoginRequired).toHaveBeenCalledOnce();
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("[browser] Manual login required"));
+  });
+
   test("fails fast for an uninitialized manual-login profile unless setup keeps Chrome open", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-empty-profile-"));
     try {
@@ -248,10 +468,23 @@ describe("manual-login profile setup gate", () => {
   });
 });
 
-// NOTE: shouldSkipThinkingTimeSelection was removed — it incorrectly assumed
-// that selecting "Pro" in the picker always implied Extended effort, which is
-// wrong for lower-tier plans where Pro defaults to Standard. The thinking time
-// step now always runs; ensureThinkingTime handles the already-selected case.
+describe("thinking time selection policy", () => {
+  test("keeps explicit effort selection enabled for Deep Research", () => {
+    const config = resolveBrowserConfig({
+      desiredModel: "gpt-5.6-sol",
+      thinkingTime: "pro",
+      researchMode: "deep",
+    });
+
+    expect(__test__.shouldApplyThinkingTimeSelection(config)).toBe(true);
+  });
+
+  test("does not select an effort when none was requested", () => {
+    const config = resolveBrowserConfig({ researchMode: "deep" });
+
+    expect(__test__.shouldApplyThinkingTimeSelection(config)).toBe(false);
+  });
+});
 
 describe("formatBrowserTurnTranscript", () => {
   test("keeps single-turn browser output unchanged", () => {
@@ -453,9 +686,102 @@ describe("ChatGPT UI warning detection", () => {
     expect(__test__.isAssistantResponseTimeoutError(new Error("Response timeout"))).toBe(true);
     expect(__test__.isAssistantResponseTimeoutError(new Error("Navigation timeout"))).toBe(false);
   });
+
+  test("waits for prior turns to hydrate before retrying capture after a stall reload", async () => {
+    vi.useFakeTimers();
+    try {
+      let reloaded = false;
+      let hydrated = false;
+      const responseProbeHydrationStates: boolean[] = [];
+      const partial = { text: "Synthetic preamble.", messageId: "mid", turnId: "tid" };
+      const complete = {
+        text: "Synthetic complete answer after safe reload.",
+        messageId: "mid",
+        turnId: "tid",
+      };
+      const Runtime = {
+        evaluate: vi.fn(async (params: { expression?: string; awaitPromise?: boolean }) => {
+          const expression = String(params.expression ?? "");
+          if (expression === "location.href") {
+            return { result: { value: "https://chatgpt.com/c/synthetic-recovery" } };
+          }
+          if (expression.startsWith("document.querySelectorAll(")) {
+            return { result: { value: hydrated ? 2 : 0 } };
+          }
+          if (expression.includes("const selectors =")) {
+            return { result: { value: true } };
+          }
+          if (params.awaitPromise) {
+            responseProbeHydrationStates.push(hydrated);
+            if (!reloaded) {
+              return new Promise(() => undefined);
+            }
+            return { result: { type: "object", value: complete } };
+          }
+          if (expression.includes("extractAssistantTurn")) {
+            return { result: { value: reloaded ? complete : partial } };
+          }
+          if (expression.includes("Find the LAST assistant turn")) {
+            return { result: { value: reloaded } };
+          }
+          return { result: { value: false } };
+        }),
+        terminateExecution: vi.fn().mockResolvedValue(undefined),
+      };
+      const Page = {
+        navigate: vi.fn(async () => {
+          reloaded = true;
+          setTimeout(() => {
+            hydrated = true;
+          }, 250);
+          return {};
+        }),
+      };
+
+      const promise = __test__.waitForAssistantResponseWithReload(
+        Runtime as never,
+        Page as never,
+        3_000,
+        vi.fn() as never,
+        undefined,
+        "synthetic-recovery",
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(promise).resolves.toMatchObject({ text: complete.text });
+      expect(Page.navigate).toHaveBeenCalledOnce();
+      expect(responseProbeHydrationStates).toEqual([false, true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("browser follow-ups", () => {
+  test("rejects direct attachment basename collisions before launching Chrome", async () => {
+    await expect(
+      runBrowserMode({
+        prompt: "test",
+        attachments: [
+          { path: "/tmp/first/SKILL.md", displayPath: "first/SKILL.md" },
+          { path: "/tmp/second/SKILL.md", displayPath: "second/SKILL.md" },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      details: {
+        stage: "upload",
+        code: "attachment-basename-collision",
+        collisions: [
+          {
+            basename: "SKILL.md",
+            files: ["first/SKILL.md", "second/SKILL.md"],
+          },
+        ],
+        files: ["first/SKILL.md", "second/SKILL.md"],
+      },
+    });
+  });
+
   test("rejects copy-profile with manual-login before launching Chrome", async () => {
     await expect(
       runBrowserMode({
@@ -544,6 +870,15 @@ describe("remote Chrome option warnings", () => {
       }),
     ).toContain("--browser-chrome-path");
   });
+
+  test("marks browser-headless as ignored for classic remote-chrome", () => {
+    expect(
+      __test__.listIgnoredRemoteChromeFlags({
+        attachRunning: false,
+        headless: true,
+      }),
+    ).toContain("--browser-headless");
+  });
 });
 
 describe("remote Chrome cleanup", () => {
@@ -565,14 +900,14 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "complete",
+      preserveTarget: false,
     });
 
     expect(closeConnection).toHaveBeenCalledTimes(1);
     expect(closeClient).not.toHaveBeenCalled();
   });
 
-  test("only detaches from the target after an incomplete run", async () => {
+  test("disconnects the browser transport while retaining an incomplete target", async () => {
     const closeConnection = vi.fn().mockResolvedValue(undefined);
     const closeClient = vi.fn().mockResolvedValue(undefined);
 
@@ -580,11 +915,11 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "attempted",
+      preserveTarget: true,
     });
 
-    expect(closeConnection).not.toHaveBeenCalled();
-    expect(closeClient).toHaveBeenCalledTimes(1);
+    expect(closeConnection).toHaveBeenCalledExactlyOnceWith({ preserveTarget: true });
+    expect(closeClient).not.toHaveBeenCalled();
   });
 
   test("detaches raw target clients when a run attaches to an existing remote tab", async () => {
@@ -594,13 +929,13 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: null,
       client: { close: closeClient },
-      runStatus: "complete",
+      preserveTarget: false,
     });
 
     expect(closeClient).toHaveBeenCalledTimes(1);
   });
 
-  test("does not close an already-lost connection", async () => {
+  test("releases an already-lost connection without closing its target", async () => {
     const closeConnection = vi.fn().mockResolvedValue(undefined);
     const closeClient = vi.fn().mockResolvedValue(undefined);
 
@@ -608,10 +943,10 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: true,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "attempted",
+      preserveTarget: true,
     });
 
-    expect(closeConnection).not.toHaveBeenCalled();
+    expect(closeConnection).toHaveBeenCalledExactlyOnceWith({ preserveTarget: true });
     expect(closeClient).not.toHaveBeenCalled();
   });
 });
@@ -627,9 +962,9 @@ describe("image-only assistant turn detection", () => {
   });
 });
 
-describe("redactBrowserConfigForDebugLogForTest", () => {
+describe("redactBrowserConfigForDebugLog", () => {
   test("redacts inline cookie values while preserving count context", () => {
-    const redacted = redactBrowserConfigForDebugLogForTest({
+    const redacted = redactBrowserConfigForDebugLog({
       inlineCookies: [
         { name: "__Secure-next-auth.session-token", value: "secret-token" },
         { name: "_account", value: "secret-account" },
@@ -649,7 +984,7 @@ describe("redactBrowserConfigForDebugLogForTest", () => {
   });
 
   test("leaves missing inline cookies unchanged", () => {
-    expect(redactBrowserConfigForDebugLogForTest({ debug: true })).toEqual({ debug: true });
+    expect(redactBrowserConfigForDebugLog({ debug: true })).toEqual({ debug: true });
   });
 });
 
@@ -679,6 +1014,52 @@ describe("shouldPreferSystemTmpDirForTest", () => {
 });
 
 describe("runSubmissionWithRecoveryForTest", () => {
+  test("rejects colliding fallback basenames before preparing or submitting fallback", async () => {
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new BrowserAutomationError("prompt too large", { code: "prompt-too-large" }),
+      );
+    const prepareFallbackSubmission = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runSubmissionWithRecoveryForTest({
+        prompt: "inline prompt",
+        attachments: [],
+        fallbackSubmission: {
+          prompt: "fallback prompt",
+          attachments: [
+            { path: "/tmp/first/SKILL.md", displayPath: "first/SKILL.md", sizeBytes: 5 },
+            { path: "/tmp/second/SKILL.md", displayPath: "second/SKILL.md", sizeBytes: 6 },
+          ],
+        },
+        submit,
+        reloadPromptComposer: vi.fn().mockResolvedValue(undefined),
+        prepareFallbackSubmission,
+        logger: vi.fn<(message: string) => void>(),
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining(
+        'inline prompt was too large, but its upload fallback cannot safely include multiple files named "SKILL.md"',
+      ),
+      details: {
+        stage: "upload-fallback",
+        code: "attachment-basename-collision",
+        collisions: [
+          {
+            basename: "SKILL.md",
+            files: ["first/SKILL.md", "second/SKILL.md"],
+          },
+        ],
+        files: ["first/SKILL.md", "second/SKILL.md"],
+      },
+    });
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith("inline prompt", []);
+    expect(prepareFallbackSubmission).not.toHaveBeenCalled();
+  });
+
   test("preserves prompt-too-large fallback after a dead-composer retry", async () => {
     const submit = vi
       .fn()
@@ -721,6 +1102,47 @@ describe("runSubmissionWithRecoveryForTest", () => {
     expect(submit).toHaveBeenNthCalledWith(2, "inline prompt", []);
     expect(submit).toHaveBeenNthCalledWith(3, "fallback prompt", [
       expect.objectContaining({ displayPath: "fallback.txt" }),
+    ]);
+  });
+
+  test("materializes fallback attachments before retrying a prompt-too-large submit", async () => {
+    const fallbackSubmission = {
+      prompt: "unbundled fallback",
+      attachments: [{ path: "/tmp/one.txt", displayPath: "one.txt", sizeBytes: 3 }],
+      prepare: vi.fn(async () => {
+        fallbackSubmission.prompt = "bundled fallback";
+        fallbackSubmission.attachments = [
+          {
+            path: "/tmp/attachments-bundle.zip",
+            displayPath: "attachments-bundle.zip",
+            sizeBytes: 12,
+          },
+        ];
+      }),
+    };
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new BrowserAutomationError("prompt too large", { code: "prompt-too-large" }),
+      )
+      .mockResolvedValueOnce({
+        baselineTurns: 1,
+        baselineAssistantText: "ok",
+      });
+
+    await runSubmissionWithRecoveryForTest({
+      prompt: "inline prompt",
+      attachments: [],
+      fallbackSubmission,
+      submit,
+      reloadPromptComposer: vi.fn().mockResolvedValue(undefined),
+      prepareFallbackSubmission: vi.fn().mockResolvedValue(undefined),
+      logger: vi.fn<(message: string) => void>(),
+    });
+
+    expect(fallbackSubmission.prepare).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenNthCalledWith(2, "bundled fallback", [
+      expect.objectContaining({ displayPath: "attachments-bundle.zip" }),
     ]);
   });
 
