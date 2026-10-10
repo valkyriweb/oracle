@@ -1,3 +1,4 @@
+import type { ProviderNativeCaptureSummary } from "./browser/chatgptConversation.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { createWriteStream, mkdirSync } from "node:fs";
@@ -8,6 +9,7 @@ import type {
   BrowserArchiveMode,
   BrowserArchiveResult,
   BrowserModelStrategy,
+  BrowserResearchPlanMetadata,
   BrowserResearchMode,
   CookieParam,
 } from "./browser/types.js";
@@ -41,6 +43,8 @@ export interface BrowserSessionConfig {
   timeoutMs?: number;
   debugPort?: number | null;
   inputTimeoutMs?: number;
+  /** Time budget for each Chrome remote-debugging approval prompt. */
+  approvalWaitMs?: number;
   /** Time budget for attachment upload/readiness before clicking send. */
   attachmentTimeoutMs?: number;
   /** Delay before rechecking the conversation after an assistant timeout. */
@@ -68,6 +72,8 @@ export interface BrowserSessionConfig {
   keepBrowser?: boolean;
   hideWindow?: boolean;
   desiredModel?: string | null;
+  /** The caller omitted a model and inherited Oracle's browser default. */
+  modelIsImplicitDefault?: boolean;
   modelStrategy?: BrowserModelStrategy;
   debug?: boolean;
   allowCookieErrors?: boolean;
@@ -85,6 +91,16 @@ export interface BrowserSessionConfig {
   archiveConversations?: BrowserArchiveMode;
   /** Browser-only: existing ChatGPT conversation URL to resume before submitting. */
   resumeConversationUrl?: string | null;
+  /** Capture ChatGPT's own conversation document plus independent per-turn digests. */
+  captureProviderNative?: boolean;
+}
+
+export interface BrowserRecoveryTarget {
+  host: string;
+  port: number;
+  targetId: string;
+  browserWSEndpoint?: string;
+  claimId?: string;
 }
 
 export interface BrowserRuntimeMetadata {
@@ -96,10 +112,16 @@ export interface BrowserRuntimeMetadata {
   chromeProfileRoot?: string;
   userDataDir?: string;
   chromeTargetId?: string;
+  /** Explicitly created by Oracle and eligible for retirement after persisted recovery. */
+  ownedRecoveryTarget?: BrowserRecoveryTarget;
   tabUrl?: string;
   conversationId?: string;
   /** True after Oracle has submitted the prompt to ChatGPT. */
   promptSubmitted?: boolean;
+  /** Fingerprint of committed user text and stable message ID; null until commitment is confirmed. */
+  submittedPromptHash?: string | null;
+  /** Latest Deep Research plan captured from ChatGPT's out-of-process iframe. */
+  researchPlan?: BrowserResearchPlanMetadata;
   /** PID of the controller process that launched this browser run. Helps detect orphaned sessions. */
   controllerPid?: number;
 }
@@ -147,6 +169,25 @@ export interface BrowserModelSelectionEvidence {
   capturedAt: string;
 }
 
+export type BrowserThinkingSelectionStatus = "already-selected" | "switched" | "unverified";
+
+/**
+ * Selection-time UI evidence, separate from the model picker record.
+ * `verified` confirms the observed selected state at `capturedAt`; it does not
+ * attest backend effort or later UI changes. Strict requests throw if unconfirmed.
+ */
+export interface BrowserThinkingSelectionEvidence {
+  requestedLevel: ThinkingTimeLevel;
+  status: BrowserThinkingSelectionStatus;
+  resolvedLabel?: string | null;
+  verified: boolean;
+  strictFailClosed: boolean;
+  targetModelKind?: string | null;
+  observedModelKind?: string | null;
+  source: "chatgpt-thinking-picker";
+  capturedAt: string;
+}
+
 export interface BrowserRunWarning {
   code: string;
   severity: "warning";
@@ -160,6 +201,8 @@ export interface BrowserMetadata {
   harvest?: BrowserHarvestMetadata;
   archive?: BrowserArchiveResult;
   modelSelection?: BrowserModelSelectionEvidence;
+  thinkingSelection?: BrowserThinkingSelectionEvidence;
+  providerNativeCapture?: ProviderNativeCaptureSummary;
   warnings?: BrowserRunWarning[];
 }
 
@@ -256,6 +299,7 @@ export interface StoredRunOptions {
   modelOverrides?: ModelOverridesConfig;
   renderPlain?: boolean;
   writeOutputPath?: string;
+  writeArtifacts?: boolean;
   partialMode?: PartialMode;
   timeoutSeconds?: number | "auto";
   httpTimeoutMs?: number;
@@ -699,7 +743,15 @@ export async function initializeSession(
     })),
     cwd,
     mode,
-    browser: browserConfig ? { config: browserConfig } : undefined,
+    browser:
+      mode === "browser"
+        ? {
+            ...(browserConfig ? { config: browserConfig } : {}),
+            runtime: { submittedPromptHash: null },
+          }
+        : browserConfig
+          ? { config: browserConfig }
+          : undefined,
     notifications,
     options: {
       prompt: options.prompt,
@@ -738,6 +790,7 @@ export async function initializeSession(
       zombieTimeoutMs: options.zombieTimeoutMs,
       zombieUseLastActivity: options.zombieUseLastActivity,
       writeOutputPath: options.writeOutputPath,
+      writeArtifacts: options.writeArtifacts,
       partialMode: options.partialMode,
       waitPreference: options.waitPreference,
       youtube: options.youtube,

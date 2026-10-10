@@ -1,6 +1,7 @@
 export type TokenizerFn = (input: unknown, options?: Record<string, unknown>) => number;
 
 export type KnownModelName =
+  | "gpt-6-astra"
   | "gpt-5.6"
   | "gpt-5.6-sol"
   | "gpt-5.5"
@@ -217,6 +218,11 @@ export interface RunOracleOptions {
   generateImage?: string;
   /** Optional output path used by browser image operations. */
   outputPath?: string;
+  youtube?: string;
+  editImage?: string;
+  aspectRatio?: string;
+  geminiShowThoughts?: boolean;
+  geminiAllowModelFallback?: boolean;
   /**
    * Browser-only: submit these prompts sequentially after the initial answer in
    * the same ChatGPT conversation.
@@ -227,6 +233,8 @@ export interface RunOracleOptions {
   background?: boolean;
   /** Optional absolute path to save only the assistant's final text output. */
   writeOutputPath?: string;
+  /** Browser-only: export captured files beside the answer written by writeOutputPath. */
+  writeArtifacts?: boolean;
   /** Multi-model failure policy: fail the command or accept partial success. */
   partialMode?: PartialMode;
   /** Number of seconds to wait before timing out, or 'auto' to use model defaults. */
@@ -341,11 +349,11 @@ export interface OracleResponse {
     input_tokens?: number;
     output_tokens?: number;
     reasoning_tokens?: number;
+    output_tokens_details?: { reasoning_tokens?: number };
     total_tokens?: number;
   };
   output_text?: string[];
   output?: ResponseOutputItem[];
-  // biome-ignore lint/style/useNamingConvention: field name provided by OpenAI Responses API
   _request_id?: string | null;
 }
 

@@ -101,7 +101,7 @@ try {
     const commit = () => {
       const editor = document.querySelector('#prompt-textarea'); const prompt = editor.value;
       setTimeout(() => {
-        const article = document.createElement('article'); article.dataset.testid = 'conversation-turn-' + (++window.proof.commits); article.dataset.messageAuthorRole = 'user';
+        const article = document.createElement('article'); article.dataset.testid = 'conversation-turn-' + (++window.proof.commits); article.dataset.messageAuthorRole = 'user'; article.dataset.messageId = 'attachment-user-' + window.proof.commits;
         const text = document.createElement('p'); text.textContent = prompt; article.append(text);
         for (const file of window.proofFiles) { const tile = document.createElement('div'); tile.dataset.testid = 'attachment-chip'; tile.textContent = file.name; article.append(tile); }
         document.querySelector('#turns').append(article); editor.value = ''; document.querySelector('#chips').replaceChildren();
@@ -168,13 +168,14 @@ try {
           input: Input,
           page: Page,
           attachmentNames: names,
+          attachmentNavigationUrl: await evaluate("location.href"),
           attachmentTimeoutMs: 1000,
           baselineTurns: 0,
         },
         "Do not send while a file is still uploading.",
         logger,
       ),
-      /Attachments never reached a clickable send button/,
+      /Attachments never reached the exact ready send button/,
     );
     assert.equal(await evaluate("window.proof.clicks + window.proof.enters"), 0);
     await evaluate('document.querySelector("#upload-progress").style.opacity = "0"');
@@ -247,9 +248,17 @@ try {
     };
     const prompt =
       "Read the three attached public synthetic fixtures. Return each test-token-not-real marker.";
+    const attachmentNavigationUrl = await evaluate("location.href");
     const started = Date.now();
     const turns = await submitPrompt(
-      { runtime, input, page, attachmentNames: names, baselineTurns: 0 },
+      {
+        runtime,
+        input,
+        page,
+        attachmentNames: names,
+        attachmentNavigationUrl,
+        baselineTurns: 0,
+      },
       prompt,
       logger,
     );
@@ -270,14 +279,7 @@ try {
     assert.equal(state.commits, 1);
     assert.equal(state.scrolls, 0);
     assert.deepEqual(state.trusted, [true]);
-    assert.deepEqual(events, [
-      "activate",
-      "measure",
-      "measure",
-      "mouseMoved",
-      "mousePressed",
-      "mouseReleased",
-    ]);
+    assert.deepEqual(events, ["activate", "key:keyDown", "key:keyUp"]);
     assert.deepEqual(await evaluate(buildAttachmentEvidenceExpression(names)), [
       false,
       false,

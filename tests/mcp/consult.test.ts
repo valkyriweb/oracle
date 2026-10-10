@@ -247,6 +247,68 @@ describe("summarizeModelRunsForConsult", () => {
     expect(summarizedImages?.[0]).not.toHaveProperty("finalUrl");
   });
 
+  test.each(["current", "ignore"] as const)(
+    "preserves Astra browser strategy %s from saved config or input",
+    (modelStrategy) => {
+      for (const explicit of [false, true]) {
+        const config = buildConsultBrowserConfig({
+          userConfig: { browser: { modelStrategy: explicit ? "select" : modelStrategy } },
+          env: {},
+          runModel: "gpt-6-astra",
+          browserModelStrategy: explicit ? modelStrategy : undefined,
+        });
+        expect(config.modelStrategy).toBe(modelStrategy);
+        expect(config.thinkingTime).toBeUndefined();
+      }
+    },
+  );
+
+  test("selects GPT-6 through MCP including explicit strategy overrides", () => {
+    expect(
+      buildConsultBrowserConfig({ userConfig: {}, env: {}, runModel: "gpt-6-astra" }),
+    ).toMatchObject({ desiredModel: "GPT-6" });
+    expect(
+      buildConsultBrowserConfig({
+        userConfig: { browser: { modelStrategy: "current" } },
+        env: {},
+        runModel: "gpt-6-astra",
+        browserModelStrategy: "select",
+      }),
+    ).toMatchObject({ desiredModel: "GPT-6", modelStrategy: "select" });
+  });
+
+  test.each(["GPT-6", "GPT-6 Pro"])(
+    "resolves explicit MCP GPT-6 Pro independently of label %s",
+    (browserModelLabel) => {
+      expect(
+        buildConsultBrowserConfig({
+          userConfig: {},
+          env: {},
+          runModel: "gpt-6-pro",
+          inputModel: "gpt-6-pro",
+          browserModelLabel,
+          browserThinkingTime: "heavy",
+          browserModelStrategy: "select",
+        }),
+      ).toMatchObject({ desiredModel: "GPT-6", thinkingTime: "heavy", modelStrategy: "select" });
+    },
+  );
+
+  test("marks only omitted MCP models as implicit defaults", () => {
+    const base = { userConfig: {}, env: {}, runModel: "gpt-5.5-pro" };
+    expect(buildConsultBrowserConfig(base).modelIsImplicitDefault).toBe(true);
+    expect(
+      buildConsultBrowserConfig({ ...base, inputModel: "gpt-5.5-pro" }).modelIsImplicitDefault,
+    ).toBe(false);
+    expect(
+      buildConsultBrowserConfig({ ...base, userConfig: { model: "gpt-5.5-pro" } })
+        .modelIsImplicitDefault,
+    ).toBe(false);
+    expect(
+      buildConsultBrowserConfig({ ...base, browserModelLabel: "GPT-5.5" }).modelIsImplicitDefault,
+    ).toBe(false);
+  });
+
   test("merges browser defaults from config for consult runs", () => {
     const config = buildConsultBrowserConfig({
       userConfig: {
@@ -334,6 +396,20 @@ describe("summarizeModelRunsForConsult", () => {
 
     expect(config).toMatchObject({
       desiredModel: "GPT-5.6 Sol",
+      thinkingTime: "pro",
+    });
+  });
+
+  test("supports gpt-6-pro through MCP browser consult config", () => {
+    const config = buildConsultBrowserConfig({
+      userConfig: {},
+      env: {},
+      runModel: "gpt-6-pro",
+      inputModel: "gpt-6-pro",
+    });
+
+    expect(config).toMatchObject({
+      desiredModel: "GPT-6",
       thinkingTime: "pro",
     });
   });
@@ -560,7 +636,7 @@ describe("summarizeModelRunsForConsult", () => {
     }
   });
 
-  test("fails closed for image output over a remote browser service", async () => {
+  test("allows image output over a remote browser service", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "oracle-home-"));
     setOracleHomeDirOverrideForTest(home);
     const prevHost = process.env.ORACLE_REMOTE_HOST;
@@ -587,15 +663,11 @@ describe("summarizeModelRunsForConsult", () => {
         model: "gpt-5.5",
         prompt: "make an image",
         files: [],
-        // Path under the Oracle home so containment passes and we reach the
-        // remote guard rather than the path check.
         generateImage: path.join(home, "generated", "img.png"),
       })) as { isError?: boolean; content: Array<{ type: "text"; text: string }> };
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0]?.text).toMatch(
-        /image output is not supported with a remote browser/i,
-      );
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toContain("image-aware wait/download path");
     } finally {
       if (prevHost === undefined) delete process.env.ORACLE_REMOTE_HOST;
       else process.env.ORACLE_REMOTE_HOST = prevHost;

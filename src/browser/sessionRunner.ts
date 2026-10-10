@@ -1,24 +1,27 @@
+import type { ProviderNativeCaptureSummary } from "./chatgptConversation.js";
 import chalk from "chalk";
 import type { RunOracleOptions } from "../oracle.js";
 import { formatTokenCount } from "../oracle/runUtils.js";
 import { formatFinishLine } from "../oracle/finishLine.js";
 import type {
   BrowserModelSelectionEvidence,
+  BrowserThinkingSelectionEvidence,
   BrowserRunWarning,
   BrowserSessionConfig,
   BrowserRuntimeMetadata,
   SessionArtifact,
 } from "../sessionStore.js";
-import { runBrowserMode } from "../browserMode.js";
+import { resolveBrowserExecutor, type BrowserExecutor } from "./executor.js";
 import type { BrowserRunOptions, BrowserRunResult } from "../browserMode.js";
 import { DEFAULT_BROWSER_CONFIG } from "./config.js";
+import { redactBrowserConfigForDebugLog } from "./configLogging.js";
 import {
   assembleBrowserPrompt,
   cleanupGeneratedBrowserBundles,
   materializeBrowserFallback,
 } from "./prompt.js";
-import { BrowserAutomationError } from "../oracle/errors.js";
-import type { BrowserArchiveResult, BrowserLogger } from "./types.js";
+import { BrowserAutomationError, BrowserRunCancelledError } from "../oracle/errors.js";
+import type { BrowserArchiveResult, BrowserLogger, SavedBrowserFile } from "./types.js";
 import {
   appendArtifacts,
   saveBrowserTranscriptArtifact,
@@ -26,6 +29,7 @@ import {
 } from "./artifacts.js";
 import {
   formatBrowserModelSelectionEvidence,
+  formatBrowserThinkingSelectionEvidence,
   formatBrowserModelTarget,
   resolveBrowserModelDisplayName,
 } from "./modelDisplay.js";
@@ -41,9 +45,12 @@ export interface BrowserExecutionResult {
   runtime: BrowserRuntimeMetadata;
   archive?: BrowserArchiveResult;
   modelSelection?: BrowserModelSelectionEvidence;
+  thinkingSelection?: BrowserThinkingSelectionEvidence;
+  providerNativeCapture?: ProviderNativeCaptureSummary;
   warnings?: BrowserRunWarning[];
   answerText: string;
   artifacts?: SessionArtifact[];
+  savedFiles?: SavedBrowserFile[];
 }
 
 interface RunBrowserSessionArgs {
@@ -51,11 +58,12 @@ interface RunBrowserSessionArgs {
   browserConfig: BrowserSessionConfig;
   cwd: string;
   log: (message?: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface BrowserSessionRunnerDeps {
   assemblePrompt?: typeof assembleBrowserPrompt;
-  executeBrowser?: typeof runBrowserMode;
+  executeBrowser?: BrowserExecutor;
   persistRuntimeHint?: (
     runtime: BrowserRuntimeMetadata,
     modelSelection?: BrowserModelSelectionEvidence,
@@ -138,25 +146,29 @@ function buildBrowserRunWarnings(args: {
 }
 
 export async function runBrowserSessionExecution(
-  { runOptions, browserConfig, cwd, log }: RunBrowserSessionArgs,
+  { runOptions, browserConfig, cwd, log, signal }: RunBrowserSessionArgs,
   deps: BrowserSessionRunnerDeps = {},
 ): Promise<BrowserExecutionResult> {
   const assemblePrompt = deps.assemblePrompt ?? assembleBrowserPrompt;
-  const executeBrowser = deps.executeBrowser ?? runBrowserMode;
   const persistRuntimeHint = deps.persistRuntimeHint ?? (() => {});
   const inputTimeoutMs = browserConfig.inputTimeoutMs ?? DEFAULT_BROWSER_CONFIG.inputTimeoutMs;
-  let preparationTimedOut = false;
+  let preparationAbandoned = false;
   let preparationTimeout: ReturnType<typeof setTimeout> | undefined;
+  let removePreparationAbortListener: (() => void) | undefined;
   let promptArtifacts: Awaited<ReturnType<typeof assembleBrowserPrompt>>;
+  if (signal?.aborted) {
+    throw new BrowserRunCancelledError();
+  }
+  const executeBrowser = deps.executeBrowser ?? (await resolveBrowserExecutor(runOptions));
   try {
     promptArtifacts = await Promise.race([
       assemblePrompt(runOptions, { cwd }).then(async (artifacts) => {
-        if (preparationTimedOut) await cleanupGeneratedBrowserBundles(artifacts);
+        if (preparationAbandoned) await cleanupGeneratedBrowserBundles(artifacts);
         return artifacts;
       }),
       new Promise<never>((_, reject) => {
         preparationTimeout = setTimeout(() => {
-          preparationTimedOut = true;
+          preparationAbandoned = true;
           reject(
             new BrowserAutomationError(
               `Browser prompt preparation timed out after ${inputTimeoutMs}ms; increase --browser-input-timeout if local files need more time.`,
@@ -169,11 +181,25 @@ export async function runBrowserSessionExecution(
           );
         }, inputTimeoutMs);
       }),
+      new Promise<never>((_, reject) => {
+        if (!signal) return;
+        const abort = () => {
+          preparationAbandoned = true;
+          reject(new BrowserRunCancelledError());
+        };
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        signal.addEventListener("abort", abort, { once: true });
+        removePreparationAbortListener = () => signal.removeEventListener("abort", abort);
+      }),
     ]);
   } finally {
     if (preparationTimeout) {
       clearTimeout(preparationTimeout);
     }
+    removePreparationAbortListener?.();
   }
   try {
     return await executeAssembledBrowserSession({
@@ -183,6 +209,7 @@ export async function runBrowserSessionExecution(
       promptArtifacts,
       executeBrowser,
       persistRuntimeHint,
+      signal,
     });
   } finally {
     await cleanupGeneratedBrowserBundles(promptArtifacts);
@@ -196,6 +223,7 @@ async function executeAssembledBrowserSession({
   promptArtifacts,
   executeBrowser,
   persistRuntimeHint,
+  signal,
 }: {
   runOptions: RunOracleOptions;
   browserConfig: BrowserSessionConfig;
@@ -203,13 +231,16 @@ async function executeAssembledBrowserSession({
   promptArtifacts: Awaited<ReturnType<typeof assembleBrowserPrompt>>;
   executeBrowser: NonNullable<BrowserSessionRunnerDeps["executeBrowser"]>;
   persistRuntimeHint: NonNullable<BrowserSessionRunnerDeps["persistRuntimeHint"]>;
+  signal?: AbortSignal;
 }): Promise<BrowserExecutionResult> {
   if (runOptions.verbose) {
     log(
       chalk.dim(
-        `[verbose] Browser config: ${JSON.stringify({
-          ...browserConfig,
-        })}`,
+        `[verbose] Browser config: ${JSON.stringify(
+          redactBrowserConfigForDebugLog({
+            ...browserConfig,
+          }),
+        )}`,
       ),
     );
     log(chalk.dim(`[verbose] Browser prompt length: ${promptArtifacts.composerText.length} chars`));
@@ -250,7 +281,7 @@ async function executeAssembledBrowserSession({
     if (typeof message !== "string") return;
     const shouldAlwaysPrint =
       message.startsWith("[browser] ") &&
-      /archive|fallback|follow-up|retry|thinking|waiting for chatgpt|browser slot|browser control|browser guidance|model selection|model picker/i.test(
+      /archive|fallback|follow-up|retry|thinking|research|manual login|waiting for chatgpt|remote debugging approval|browser slot|browser control|browser guidance|model selection|model picker/i.test(
         message,
       );
     if (!runOptions.verbose && !shouldAlwaysPrint) return;
@@ -286,6 +317,7 @@ async function executeAssembledBrowserSession({
   try {
     browserResult = await executeBrowser({
       prompt: promptArtifacts.composerText,
+      model: runOptions.model,
       attachments: promptArtifacts.attachments,
       fallbackSubmission,
       config: executionBrowserConfig,
@@ -296,6 +328,8 @@ async function executeAssembledBrowserSession({
       generateImagePath: runOptions.generateImage,
       outputPath: runOptions.outputPath,
       followUpPrompts: runOptions.browserFollowUps,
+      signal,
+      closeOwnedTabOnCancel: !executionBrowserConfig.keepBrowser,
       runtimeHintCb: async (runtime, modelSelection) => {
         const runtimeWithController = {
           ...runtime,
@@ -309,7 +343,7 @@ async function executeAssembledBrowserSession({
       },
     });
   } catch (error) {
-    if (error instanceof BrowserAutomationError) {
+    if (error instanceof BrowserAutomationError || error instanceof BrowserRunCancelledError) {
       throw error;
     }
     const message = error instanceof Error ? error.message : "Browser automation failed.";
@@ -320,6 +354,12 @@ async function executeAssembledBrowserSession({
   if (modelSelection) {
     log(
       `[browser] Model selection evidence: ${formatBrowserModelSelectionEvidence(modelSelection, runOptions.model)}`,
+    );
+  }
+  const thinkingSelection = browserResult.thinkingSelection;
+  if (thinkingSelection) {
+    log(
+      `[browser] Thinking effort evidence: ${formatBrowserThinkingSelectionEvidence(thinkingSelection)}`,
     );
   }
   const warnings = buildBrowserRunWarnings({
@@ -407,16 +447,22 @@ async function executeAssembledBrowserSession({
       chromeProfileRoot: browserResult.chromeProfileRoot,
       userDataDir: browserResult.userDataDir,
       chromeTargetId: browserResult.chromeTargetId,
+      ownedRecoveryTarget: browserResult.ownedRecoveryTarget,
       tabUrl: browserResult.tabUrl,
       conversationId: browserResult.conversationId,
       promptSubmitted: browserResult.promptSubmitted,
+      submittedPromptHash: browserResult.submittedPromptHash,
+      researchPlan: browserResult.researchPlan,
       controllerPid: browserResult.controllerPid ?? process.pid,
     },
     archive: browserResult.archive,
     modelSelection,
+    thinkingSelection,
+    providerNativeCapture: browserResult.providerNativeCapture,
     warnings,
     answerText,
     artifacts: savedArtifacts,
+    savedFiles: browserResult.savedFiles,
   };
 }
 

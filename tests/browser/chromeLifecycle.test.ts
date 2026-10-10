@@ -33,6 +33,49 @@ vi.doMock("../../src/browser/profileState.js", async () => {
   };
 });
 
+describe("cold Chrome startup", () => {
+  test.each([
+    { label: "dynamic", configured: undefined, environment: "", expected: undefined },
+    { label: "configured", configured: 49123, environment: "49124", expected: 49123 },
+    { label: "environment", configured: undefined, environment: "49124", expected: 49124 },
+  ])(
+    "selects a current $label port despite stale launch logs (#535)",
+    async ({ configured, environment, expected }) => {
+      const { launchChrome } = await import("../../src/browser/chromeLifecycle.js");
+      const { resolveBrowserConfig } = await import("../../src/browser/config.js");
+      const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-stale-launch-log-"));
+      const stale = "DevTools listening on ws://127.0.0.1:1/devtools/browser/stale\n";
+      await writeFile(path.join(dir, "chrome-err.log"), stale);
+      vi.stubEnv("ORACLE_BROWSER_PORT", environment);
+      vi.stubEnv("ORACLE_BROWSER_DEBUG_PORT", "");
+      vi.stubEnv("ORACLE_BROWSER_REMOTE_DEBUG_HOST", "");
+      vi.stubEnv("WSL_HOST_IP", "");
+      chromeLaunchMock.mockReset();
+      chromeLaunchMock.mockImplementation(async (options: { port?: number }) => ({
+        pid: 1234,
+        port: options.port ?? 0,
+        kill: vi.fn(),
+      }));
+      try {
+        await launchChrome(
+          resolveBrowserConfig({ debugPort: configured, manualLogin: false }),
+          dir,
+          vi.fn<(message: string) => void>(),
+        );
+        expect(chromeLaunchMock).toHaveBeenCalledOnce();
+        const port = chromeLaunchMock.mock.calls[0]?.[0].port;
+        expect(Number.isInteger(port)).toBe(true);
+        expect(port).toBeGreaterThan(1);
+        if (expected !== undefined) expect(port).toBe(expected);
+        await expect(readFile(path.join(dir, "chrome-err.log"), "utf8")).resolves.toBe(stale);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe("registerTerminationHooks", () => {
   test("kills Chrome and removes a copied profile on an in-flight signal", async () => {
     const { registerTerminationHooks } = await import("../../src/browser/chromeLifecycle.js");
@@ -158,6 +201,38 @@ describe("copied-profile launch flags", () => {
     expect(options.chromeFlags).not.toContain("--use-mock-keychain");
     expect(options.chromeFlags).not.toContain("--password-store=basic");
     expect(options.chromeFlags).toContain("--remote-debugging-address=0.0.0.0");
+  });
+
+  test("uses the native Keychain for a persistent macOS manual-login profile", async () => {
+    const { resolveChromeLaunchOptionsForTest } =
+      await import("../../src/browser/chromeLifecycle.js");
+    const flags = ["--use-mock-keychain", "--password-store=basic", "--no-first-run"];
+    const options = resolveChromeLaunchOptionsForTest(flags, false, true, "darwin");
+    expect(options.ignoreDefaultFlags).toBe(true);
+    expect(options.chromeFlags).not.toContain("--use-mock-keychain");
+    expect(options.chromeFlags).not.toContain("--password-store=basic");
+    expect(options.chromeFlags).toContain("--no-first-run");
+    expect(resolveChromeLaunchOptionsForTest(flags, false, true, "linux").ignoreDefaultFlags).toBe(
+      false,
+    );
+  });
+
+  test("keeps the old cookie mode for existing macOS profiles", async () => {
+    const { resolveChromeLaunchOptionsForTest, shouldUseNativeManualLoginKeychain } =
+      await import("../../src/browser/chromeLifecycle.js");
+    const profile = await mkdtemp(path.join(os.tmpdir(), "oracle-keychain-mode-"));
+    try {
+      expect(await shouldUseNativeManualLoginKeychain(profile, "darwin")).toBe(true);
+      await writeFile(path.join(profile, "Local State"), "{}");
+      expect(await shouldUseNativeManualLoginKeychain(profile, "darwin")).toBe(false);
+      const legacy = resolveChromeLaunchOptionsForTest([], false, false, "darwin");
+      expect(legacy.ignoreDefaultFlags).toBe(false);
+      await writeFile(path.join(profile, ".oracle-native-keychain-v1"), "native-keychain\n");
+      expect(await shouldUseNativeManualLoginKeychain(profile, "darwin")).toBe(true);
+      expect(await shouldUseNativeManualLoginKeychain(profile, "linux")).toBe(false);
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
   });
 });
 
@@ -607,6 +682,7 @@ describe("connectWithNewTab", () => {
 
 describe("closeBlankChromeTabs", () => {
   beforeEach(() => {
+    vi.resetModules();
     cdpMock.mockReset();
     cdpNewMock.mockReset();
     cdpCloseMock.mockReset();
@@ -753,6 +829,37 @@ describe("closeBlankChromeTabs", () => {
     expect(send).toHaveBeenCalledWith("Target.setAutoAttach", { autoAttach: true }, "session-9");
   });
 
+  test.each([true, false])(
+    "retains the browser transport with preserveTarget=%s",
+    async (preserveTarget) => {
+      const browser = {
+        Target: {
+          createTarget: vi.fn(async () => ({ targetId: "owned" })),
+          attachToTarget: vi.fn(async () => ({ sessionId: "session" })),
+          detachFromTarget: vi.fn(async () => ({})),
+          closeTarget: vi.fn(async () => ({ success: true })),
+        },
+        on: vi.fn(),
+        once: vi.fn(),
+        removeListener: vi.fn(),
+        close: vi.fn(async () => {}),
+      };
+      cdpMock.mockResolvedValueOnce(browser);
+      const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+      const connection = await connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        () => {},
+        "about:blank",
+        "ws://127.0.0.1:9222/devtools/browser/test",
+      );
+      await connection.close({ preserveTarget });
+      expect(browser.Target.detachFromTarget).toHaveBeenCalledOnce();
+      expect(browser.close).not.toHaveBeenCalled();
+      expect(browser.Target.closeTarget).toHaveBeenCalledTimes(preserveTarget ? 0 : 1);
+    },
+  );
+
   test("waits on a single websocket connection attempt for Chrome approval", async () => {
     vi.useFakeTimers();
     const browserClient = {
@@ -796,9 +903,10 @@ describe("closeBlankChromeTabs", () => {
 
     expect(cdpMock).toHaveBeenCalledTimes(1);
     expect(logger).toHaveBeenCalledWith(
-      "Waiting for Chrome remote debugging approval for 127.0.0.1:9222...",
+      "[browser] Waiting for Chrome remote debugging approval for 127.0.0.1:9222...",
     );
     expect(connection.targetId).toBe("target-10");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   test("fails after the approval wait without opening a second websocket request", async () => {
@@ -824,46 +932,187 @@ describe("closeBlankChromeTabs", () => {
 
     expect(cdpMock).toHaveBeenCalledTimes(1);
     expect(logger).toHaveBeenCalledWith(
-      "Waiting for Chrome remote debugging approval for 127.0.0.1:9222...",
+      "[browser] Waiting for Chrome remote debugging approval for 127.0.0.1:9222...",
     );
   });
 
-  test("retries immediate 403 responses while waiting for remote debugging approval", async () => {
+  test("keeps one approval request pending beyond 20 seconds and logs every 15 seconds", async () => {
     vi.useFakeTimers();
-    const browserClient = {
-      Target: {
-        createTarget: vi.fn(async () => ({ targetId: "target-20" })),
-        attachToTarget: vi.fn(async () => ({ sessionId: "session-20" })),
-      },
+    const browser = {
+      Target: { getTargets: vi.fn(async () => ({ targetInfos: [] })) },
       close: vi.fn(async () => {}),
-      on: vi.fn(),
-      once: vi.fn(),
-      off: vi.fn(),
-      removeListener: vi.fn(),
     };
-    cdpMock
-      .mockRejectedValueOnce(new Error("Unexpected server response: 403"))
-      .mockRejectedValueOnce(new Error("Unexpected server response: 403"))
-      .mockResolvedValueOnce(browserClient);
+    cdpMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(browser), 55_000);
+        }),
+    );
+    const { listRemoteChromeTargets } = await import("../../src/browser/chromeLifecycle.js");
+    const logger = vi.fn();
+    const waiting = listRemoteChromeTargets({
+      host: "127.0.0.1",
+      port: 9222,
+      browserWSEndpoint: "ws://127.0.0.1:9222/devtools/browser/abc",
+      approvalWaitMs: 300_000,
+      logger,
+    });
+    await vi.advanceTimersByTimeAsync(54_999);
+    expect(cdpMock).toHaveBeenCalledTimes(1);
+    expect(browser.Target.getTargets).not.toHaveBeenCalled();
+    expect(logger.mock.calls.map(([line]) => line)).toEqual([
+      "[browser] Waiting for Chrome remote debugging approval for 127.0.0.1:9222...",
+      "[browser] Still waiting for Chrome remote debugging approval for 127.0.0.1:9222 (15s elapsed). Click Allow in an open Chrome window.",
+      "[browser] Still waiting for Chrome remote debugging approval for 127.0.0.1:9222 (30s elapsed). Click Allow in an open Chrome window.",
+      "[browser] Still waiting for Chrome remote debugging approval for 127.0.0.1:9222 (45s elapsed). Click Allow in an open Chrome window.",
+    ]);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(waiting).resolves.toEqual([]);
+    expect(browser.close).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
+  test("retains the browser-level CDP connection when target discovery is cancelled", async () => {
+    const cancellation = new AbortController();
+    const browser = {
+      Target: { getTargets: vi.fn(() => new Promise(() => undefined)) },
+      close: vi.fn(async () => {}),
+    };
+    cdpMock.mockResolvedValueOnce(browser);
+    const { listRemoteChromeTargets } = await import("../../src/browser/chromeLifecycle.js");
+    const waiting = listRemoteChromeTargets({
+      host: "127.0.0.1",
+      port: 9222,
+      browserWSEndpoint: "ws://127.0.0.1:9222/devtools/browser/abc",
+      signal: cancellation.signal,
+    });
+    await vi.waitFor(() => expect(browser.Target.getTargets).toHaveBeenCalledOnce());
+    cancellation.abort();
+
+    const { BrowserRunCancelledError: CancellationError } =
+      await import("../../src/oracle/errors.js");
+    await expect(waiting).rejects.toThrow(CancellationError);
+    expect(browser.close).not.toHaveBeenCalled();
+  });
+
+  test("releases a connection approved after its deadline without creating a tab", async () => {
+    vi.useFakeTimers();
+    const browser = {
+      Target: { createTarget: vi.fn() },
+      close: vi.fn(async () => {}),
+    };
+    cdpMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(browser), 21_000);
+        }),
+    );
     const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
     const logger = vi.fn();
-    const promise = connectToRemoteChrome(
+    const waiting = connectToRemoteChrome(
       "127.0.0.1",
       9222,
       logger,
-      "https://chatgpt.com/",
+      "about:blank",
       "ws://127.0.0.1:9222/devtools/browser/abc",
       { approvalWaitMs: 20_000 },
     );
-
-    await vi.advanceTimersByTimeAsync(1_000);
-
-    const connection = await promise;
-
-    expect(cdpMock).toHaveBeenCalledTimes(3);
-    expect(connection.targetId).toBe("target-20");
+    const failure = expect(waiting).rejects.toThrow(/waited 20s/);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await failure;
+    const messages = logger.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(browser.close).not.toHaveBeenCalled();
+    expect(browser.Target.createTarget).not.toHaveBeenCalled();
+    expect(logger).toHaveBeenCalledTimes(messages);
+    expect(vi.getTimerCount()).toBe(0);
   });
+
+  test.each(["ECONNREFUSED", "Unexpected server response: 500"])(
+    "stops approval timers on %s",
+    async (message) => {
+      vi.useFakeTimers();
+      cdpMock.mockRejectedValueOnce(new Error(message));
+      const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+      await expect(
+        connectToRemoteChrome(
+          "127.0.0.1",
+          9222,
+          vi.fn<(message: string) => void>(),
+          "about:blank",
+          "ws://127.0.0.1:9222/devtools/browser/abc",
+          { approvalWaitMs: 300_000 },
+        ),
+      ).rejects.toThrow(message);
+      expect(cdpMock).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  test.each([403, 404])(
+    "retries immediate %s responses while waiting for approval (#537)",
+    async (httpCode) => {
+      vi.useFakeTimers();
+      const browserClient = {
+        Target: {
+          createTarget: vi.fn(async () => ({ targetId: "target-20" })),
+          attachToTarget: vi.fn(async () => ({ sessionId: "session-20" })),
+        },
+        close: vi.fn(async () => {}),
+        on: vi.fn(),
+        once: vi.fn(),
+        off: vi.fn(),
+        removeListener: vi.fn(),
+      };
+      cdpMock
+        .mockRejectedValueOnce(new Error(`Unexpected server response: ${httpCode}`))
+        .mockRejectedValueOnce(new Error(`Unexpected server response: ${httpCode}`))
+        .mockResolvedValueOnce(browserClient);
+
+      const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+      const logger = vi.fn();
+      const promise = connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        logger,
+        "https://chatgpt.com/",
+        "ws://127.0.0.1:9222/devtools/browser/abc",
+        { approvalWaitMs: 20_000 },
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const connection = await promise;
+
+      expect(cdpMock).toHaveBeenCalledTimes(3);
+      expect(connection.targetId).toBe("target-20");
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  test.each([0, 1_000])(
+    "bounds repeated 404 responses to the %s ms approval window (#537)",
+    async (approvalWaitMs) => {
+      vi.useFakeTimers();
+      cdpMock.mockRejectedValue(new Error("Unexpected server response: 404"));
+      const { connectToRemoteChrome } = await import("../../src/browser/chromeLifecycle.js");
+      const waiting = connectToRemoteChrome(
+        "127.0.0.1",
+        9222,
+        vi.fn<(message: string) => void>(),
+        "about:blank",
+        "ws://127.0.0.1:9222/devtools/browser/test",
+        { approvalWaitMs },
+      );
+      const assertion = expect(waiting).rejects.toThrow(
+        approvalWaitMs ? /waited 1s.*approval/ : /404/,
+      );
+      await vi.advanceTimersByTimeAsync(approvalWaitMs);
+      await assertion;
+      expect(cdpMock).toHaveBeenCalledTimes(approvalWaitMs ? 2 : 1);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });
 
 describe("ensureChromePageTargetAfterClose", () => {

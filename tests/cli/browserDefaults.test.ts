@@ -10,6 +10,29 @@ import { buildBrowserConfig } from "../../src/cli/browserConfig.js";
 const source = (_key: keyof BrowserDefaultsOptions) => undefined;
 
 describe("applyBrowserDefaultsFromConfig", () => {
+  test("applies provider evidence preference while respecting explicit opt-out", async () => {
+    const options: BrowserDefaultsOptions = {};
+    const config: UserConfig = { browser: { captureProviderNative: true } };
+    applyBrowserDefaultsFromConfig(options, config, source);
+    expect(
+      (
+        await buildBrowserConfig({
+          browserCaptureProviderNative: options.browserCaptureProviderNative,
+          model: "gpt-5.6-sol",
+        })
+      ).captureProviderNative,
+    ).toBe(true);
+    options.browserCaptureProviderNative = false;
+    applyBrowserDefaultsFromConfig(options, config, () => "cli");
+    expect(
+      (
+        await buildBrowserConfig({
+          browserCaptureProviderNative: options.browserCaptureProviderNative,
+          model: "gpt-5.6-sol",
+        })
+      ).captureProviderNative,
+    ).toBe(false);
+  });
   test("uses the same configured remote Chrome as MCP unless CLI overrides it", () => {
     const options: BrowserDefaultsOptions = {};
     const config: UserConfig = { browser: { remoteChrome: { host: "127.0.0.1", port: 9222 } } };
@@ -170,6 +193,56 @@ describe("applyBrowserDefaultsFromConfig", () => {
 
   test("applies thinking time when CLI flag is untouched", () => {
     const options: BrowserDefaultsOptions = {};
+    const config: UserConfig = {
+      browser: {
+        thinkingTime: "extended",
+      },
+    };
+
+    applyBrowserDefaultsFromConfig(options, config, (_key) => "default");
+
+    expect(options.browserThinkingTime).toBe("extended");
+  });
+
+  test("keeps the GPT-6 Pro effort default when the model comes from CLI", async () => {
+    const options: BrowserDefaultsOptions = { model: "gpt-6-pro" };
+    const config: UserConfig = {
+      browser: {
+        thinkingTime: "extended",
+      },
+    };
+
+    applyBrowserDefaultsFromConfig(options, config, (key) => (key === "model" ? "cli" : "default"));
+
+    expect(options.browserThinkingTime).toBeUndefined();
+    await expect(
+      buildBrowserConfig({
+        model: options.model!,
+        browserThinkingTime: options.browserThinkingTime,
+      }),
+    ).resolves.toMatchObject({ thinkingTime: "pro" });
+  });
+
+  test("keeps an explicit CLI effort for GPT-6 Pro", () => {
+    const options: BrowserDefaultsOptions = {
+      model: "gpt-6-pro",
+      browserThinkingTime: "extended",
+    };
+    const config: UserConfig = {
+      browser: {
+        thinkingTime: "standard",
+      },
+    };
+
+    applyBrowserDefaultsFromConfig(options, config, (key) =>
+      key === "model" || key === "browserThinkingTime" ? "cli" : "default",
+    );
+
+    expect(options.browserThinkingTime).toBe("extended");
+  });
+
+  test("preserves configured effort when GPT-6 Pro does not come from CLI", () => {
+    const options: BrowserDefaultsOptions = { model: "gpt-6-pro" };
     const config: UserConfig = {
       browser: {
         thinkingTime: "extended",

@@ -71,13 +71,13 @@ const consultInputShape = {
     .enum(["api", "browser"])
     .optional()
     .describe(
-      "Execution engine. `api` uses OpenAI/other providers. `browser` automates the ChatGPT web UI (supports attachments and ChatGPT-only model labels). When omitted, Oracle follows CLI defaults: config/ORACLE_ENGINE first, then `api` when OPENAI_API_KEY is set, otherwise `browser`.",
+      "Execution engine. `api` uses provider APIs. `browser` uses ChatGPT automation or the local Gemini web client according to the model. Picker labels apply to ChatGPT only. When omitted, Oracle follows CLI defaults: config/ORACLE_ENGINE first, then `api` when OPENAI_API_KEY is set, otherwise `browser`.",
     ),
   browserModelLabel: z
     .string()
     .optional()
     .describe(
-      'Browser-only: explicit ChatGPT UI label to select (overrides model mapping). Example: "GPT-5.2 Thinking".',
+      "Browser-only: ChatGPT UI label for custom model IDs. Recognized GPT models use their verified model mapping.",
     ),
   browserAttachments: z
     .enum(["auto", "never", "always"])
@@ -107,9 +107,9 @@ const consultInputShape = {
       "Browser-only: model picker strategy. Mirrors the CLI --browser-model-strategy flag.",
     ),
   browserResearchMode: z
-    .enum(["deep"])
+    .enum(["search", "deep"])
     .optional()
-    .describe("Browser-only: activate ChatGPT Deep Research mode for broad web research."),
+    .describe("Browser-only: explicitly select ChatGPT Web Search or Deep Research."),
   browserArchive: z
     .enum(["auto", "always", "never"])
     .optional()
@@ -345,7 +345,7 @@ export function buildConsultBrowserConfig({
   browserModelLabel?: string;
   browserThinkingTime?: ThinkingTimeLevel;
   browserModelStrategy?: BrowserModelStrategy;
-  browserResearchMode?: "deep";
+  browserResearchMode?: "search" | "deep";
   browserArchive?: "auto" | "always" | "never";
   browserKeepBrowser?: boolean;
 }): BrowserSessionConfig {
@@ -390,6 +390,7 @@ export function buildConsultBrowserConfig({
     researchMode: browserResearchMode ?? configuredBrowser.researchMode,
     archiveConversations: browserArchive ?? configuredBrowser.archiveConversations,
     desiredModel: desiredModelLabel || mapModelToBrowserLabel(runModel),
+    modelIsImplicitDefault: !inputModel && !userConfig.model && !browserModelLabel,
   };
 }
 
@@ -588,15 +589,6 @@ export async function runConsultTool(
     requestLog(level, { text, bytes: Buffer.byteLength(text, "utf8") }).catch(() => {});
 
   const resolvedRemote = resolveRemoteServiceConfig({ userConfig, env: process.env });
-  const imageOutputPath = runOptions.generateImage ?? runOptions.outputPath;
-  if (resolvedEngine === "browser" && resolvedRemote.host && imageOutputPath) {
-    return {
-      isError: true,
-      content: textContent(
-        "ChatGPT image output is not supported with a remote browser service: generated files are not transferred back to the MCP caller. Unset ORACLE_REMOTE_HOST to generate images locally, or omit generateImage/outputPath.",
-      ),
-    };
-  }
   let browserConfig: BrowserSessionConfig | undefined;
   if (resolvedEngine === "browser") {
     browserConfig = buildConsultBrowserConfig({

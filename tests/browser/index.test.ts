@@ -8,7 +8,6 @@ import {
   formatBrowserTurnTranscript,
   isLocalChromeHostForTest,
   maybeArchiveCompletedConversationForTest,
-  redactBrowserConfigForDebugLogForTest,
   resolveRemoteTabLeaseProfileDirForTest,
   runBrowserMode,
   runSubmissionWithRecoveryForTest,
@@ -16,9 +15,23 @@ import {
   shouldPreserveBrowserOnErrorForTest,
 } from "../../src/browser/index.js";
 import { resolveBrowserConfig } from "../../src/browser/config.js";
+import { redactBrowserConfigForDebugLog } from "../../src/browser/configLogging.js";
 import { BrowserAutomationError } from "../../src/oracle/errors.js";
 
 describe("generated image response failures", () => {
+  test("completes image generation when a detached gallery appears without answer text", async () => {
+    const evaluate = vi.fn(async ({ expression }: { expression: string }) => ({
+      result: {
+        value: expression.includes("const isGeneratedImage")
+          ? [{ url: "blob:https://chatgpt.com/00000000-0000-4000-8000-000000000001", width: 1024 }]
+          : { text: "Edit", turnIndex: 2 },
+      },
+    }));
+    await expect(
+      __test__.pollGeneratedImageOrTextAssistantResponse({ evaluate } as never, 100, 2),
+    ).resolves.toMatchObject({ text: "Generated image" });
+  });
+
   test("rejects a current Retry failure instead of accepting its text as an image answer", async () => {
     const evaluate = vi.fn().mockResolvedValue({
       result: {
@@ -385,6 +398,27 @@ describe("browser run target cleanup", () => {
 });
 
 describe("manual-login profile setup gate", () => {
+  test("announces missing login and reveals the window before retrying", async () => {
+    const evaluate = vi
+      .fn()
+      .mockResolvedValueOnce({ result: { value: { ok: false, domLoginCta: true } } })
+      .mockResolvedValueOnce({ result: { value: { clicked: false, reason: "not-found" } } })
+      .mockResolvedValue({ result: { value: { ok: true } } });
+    const logger = vi.fn();
+    const onLoginRequired = vi.fn(async () => {});
+    await __test__.waitForLogin({
+      runtime: { evaluate } as never,
+      logger,
+      appliedCookies: 0,
+      manualLogin: true,
+      timeoutMs: 5000,
+      keepBrowser: false,
+      onLoginRequired,
+    });
+    expect(onLoginRequired).toHaveBeenCalledOnce();
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining("[browser] Manual login required"));
+  });
+
   test("fails fast for an uninitialized manual-login profile unless setup keeps Chrome open", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "oracle-empty-profile-"));
     try {
@@ -866,14 +900,14 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "complete",
+      preserveTarget: false,
     });
 
     expect(closeConnection).toHaveBeenCalledTimes(1);
     expect(closeClient).not.toHaveBeenCalled();
   });
 
-  test("only detaches from the target after an incomplete run", async () => {
+  test("disconnects the browser transport while retaining an incomplete target", async () => {
     const closeConnection = vi.fn().mockResolvedValue(undefined);
     const closeClient = vi.fn().mockResolvedValue(undefined);
 
@@ -881,11 +915,11 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "attempted",
+      preserveTarget: true,
     });
 
-    expect(closeConnection).not.toHaveBeenCalled();
-    expect(closeClient).toHaveBeenCalledTimes(1);
+    expect(closeConnection).toHaveBeenCalledExactlyOnceWith({ preserveTarget: true });
+    expect(closeClient).not.toHaveBeenCalled();
   });
 
   test("detaches raw target clients when a run attaches to an existing remote tab", async () => {
@@ -895,13 +929,13 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: false,
       connection: null,
       client: { close: closeClient },
-      runStatus: "complete",
+      preserveTarget: false,
     });
 
     expect(closeClient).toHaveBeenCalledTimes(1);
   });
 
-  test("does not close an already-lost connection", async () => {
+  test("releases an already-lost connection without closing its target", async () => {
     const closeConnection = vi.fn().mockResolvedValue(undefined);
     const closeClient = vi.fn().mockResolvedValue(undefined);
 
@@ -909,10 +943,10 @@ describe("remote Chrome cleanup", () => {
       connectionClosedUnexpectedly: true,
       connection: { close: closeConnection },
       client: { close: closeClient },
-      runStatus: "attempted",
+      preserveTarget: true,
     });
 
-    expect(closeConnection).not.toHaveBeenCalled();
+    expect(closeConnection).toHaveBeenCalledExactlyOnceWith({ preserveTarget: true });
     expect(closeClient).not.toHaveBeenCalled();
   });
 });
@@ -928,9 +962,9 @@ describe("image-only assistant turn detection", () => {
   });
 });
 
-describe("redactBrowserConfigForDebugLogForTest", () => {
+describe("redactBrowserConfigForDebugLog", () => {
   test("redacts inline cookie values while preserving count context", () => {
-    const redacted = redactBrowserConfigForDebugLogForTest({
+    const redacted = redactBrowserConfigForDebugLog({
       inlineCookies: [
         { name: "__Secure-next-auth.session-token", value: "secret-token" },
         { name: "_account", value: "secret-account" },
@@ -950,7 +984,7 @@ describe("redactBrowserConfigForDebugLogForTest", () => {
   });
 
   test("leaves missing inline cookies unchanged", () => {
-    expect(redactBrowserConfigForDebugLogForTest({ debug: true })).toEqual({ debug: true });
+    expect(redactBrowserConfigForDebugLog({ debug: true })).toEqual({ debug: true });
   });
 });
 

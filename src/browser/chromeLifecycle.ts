@@ -1,4 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import * as childProcess from "node:child_process";
 import net from "node:net";
 import path from "node:path";
@@ -15,6 +16,8 @@ import type { BrowserLogger, ResolvedBrowserConfig, ChromeClient } from "./types
 import { cleanupStaleProfileState } from "./profileState.js";
 import { delay } from "./utils.js";
 import { isWsl, resolveWslChromeLaunchRoute } from "./wslHost.js";
+import { BrowserCancellation } from "./cancellation.js";
+import { acquireBrowserConnection } from "./browserConnection.js";
 
 export async function launchChrome(
   config: ResolvedBrowserConfig,
@@ -22,9 +25,14 @@ export async function launchChrome(
   logger: BrowserLogger,
 ) {
   const { connectHost, debugBindAddress, usePatchedLauncher } = resolveWslChromeLaunchRoute();
-  const debugPort = config.debugPort ?? parseDebugPortEnv();
+  // Persistent stderr logs can contain an older browser's dynamically assigned port.
+  const debugPort = (config.debugPort ?? parseDebugPortEnv()) || (await findEphemeralPort());
   const usingCopiedProfile = Boolean(config.copyProfileSource);
   const detachSharedChrome = shouldDetachSharedChrome(config);
+  const nativeKeychainMarker = path.join(userDataDir, ".oracle-native-keychain-v1");
+  const nativeManualLogin =
+    config.manualLogin === true &&
+    (await shouldUseNativeManualLoginKeychain(userDataDir, process.platform));
   const launchedProfileDirectory =
     usingCopiedProfile && config.chromeProfile ? config.chromeProfile : "Default";
   await prepareChromeWindowStateForHiddenLaunch({
@@ -38,14 +46,16 @@ export async function launchChrome(
     debugBindAddress,
     config.hideWindow ?? false,
   );
-  // copy-profile reuses a copied signed-in profile whose cookies are
-  // Keychain-encrypted, so it must launch with the real Keychain (not mocked):
-  // strip the keychain-mocking flags from both chrome-launcher's defaults and
-  // Oracle's set, and ignore the defaults so they aren't re-added.
+  // New macOS manual-login profiles use the real Keychain. Keep the launcher's
+  // mock Keychain for existing profiles until users choose a new profile path.
   if (usingCopiedProfile && config.chromeProfile) {
     chromeFlags.push(`--profile-directory=${config.chromeProfile}`);
   }
-  const launchOptions = resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile);
+  const launchOptions = resolveChromeLaunchOptions(
+    chromeFlags,
+    usingCopiedProfile,
+    nativeManualLogin,
+  );
   const launcher = usePatchedLauncher
     ? await launchWithCustomHost({
         chromeFlags: launchOptions.chromeFlags,
@@ -68,6 +78,13 @@ export async function launchChrome(
         detachSharedChrome,
       );
   const pidLabel = typeof launcher.pid === "number" ? ` (pid ${launcher.pid})` : "";
+  if (nativeManualLogin) {
+    await writeFile(nativeKeychainMarker, "native-keychain\n");
+  } else if (config.manualLogin && process.platform === "darwin" && !usingCopiedProfile) {
+    logger(
+      "[browser] Existing manual-login profile retains its saved Chrome login. To use the native Keychain, choose a new --browser-manual-login-profile-dir and sign in once.",
+    );
+  }
   const hostLabel = connectHost ? ` on ${connectHost}` : "";
   logger(`Launched Chrome${pidLabel} on port ${launcher.port}${hostLabel}`);
   if (detachSharedChrome) {
@@ -76,6 +93,19 @@ export async function launchChrome(
   return Object.assign(launcher, { host: connectHost ?? "127.0.0.1" }) as LaunchedChrome & {
     host?: string;
   };
+}
+
+export async function shouldUseNativeManualLoginKeychain(
+  userDataDir: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (platform !== "darwin") return false;
+  const exists = (filePath: string) =>
+    access(filePath)
+      .then(() => true)
+      .catch(() => false);
+  if (await exists(path.join(userDataDir, ".oracle-native-keychain-v1"))) return true;
+  return !(await exists(path.join(userDataDir, "Local State")));
 }
 
 function shouldDetachSharedChrome(
@@ -511,9 +541,10 @@ export async function connectToRemoteChrome(
       return {
         client: targetConnection.client,
         targetId: targetConnection.targetId,
-        close: async () => {
+        close: async (closeOptions) => {
           await targetConnection.client.close().catch(() => undefined);
-          await closeRemoteChromeTarget(host, port, targetConnection.targetId, logger);
+          if (!closeOptions?.preserveTarget)
+            await closeRemoteChromeTarget(host, port, targetConnection.targetId, logger);
         },
       };
     }
@@ -557,7 +588,7 @@ export interface RemoteChromeConnection {
   client: ChromeClient;
   targetId?: string;
   browserWSEndpoint?: string;
-  close: () => Promise<void>;
+  close: (options?: { preserveTarget?: boolean }) => Promise<void>;
 }
 
 export interface IsolatedTabConnection {
@@ -576,27 +607,53 @@ export interface RemoteTargetInfo {
   targetId?: string;
   type?: string;
   url?: string;
+  title?: string;
 }
 
 export async function listRemoteChromeTargets(options: {
   host: string;
   port: number;
   browserWSEndpoint?: string;
+  approvalWaitMs?: number;
+  logger?: BrowserLogger;
+  signal?: AbortSignal;
 }): Promise<RemoteTargetInfo[]> {
-  if (!options.browserWSEndpoint) {
-    const targets = await CDP.List({ host: options.host, port: options.port });
-    return targets as unknown as RemoteTargetInfo[];
-  }
-  const browser = await CDP({ target: options.browserWSEndpoint, local: true });
+  const logger = options.logger ?? (() => {});
+  const cancellation = new BrowserCancellation(options.signal, logger);
   try {
-    const result = await browser.Target.getTargets();
-    return (result.targetInfos ?? []).map((target) => ({
-      targetId: target.targetId,
-      type: target.type,
-      url: target.url,
-    }));
+    return await cancellation.run(async () => {
+      if (!options.browserWSEndpoint) {
+        const targets = await cancellation.call(() =>
+          CDP.List({ host: options.host, port: options.port }),
+        );
+        return targets as unknown as RemoteTargetInfo[];
+      }
+      const browser = await cancellation.acquire(
+        () =>
+          connectToBrowserWebSocket(
+            options.host,
+            options.port,
+            options.browserWSEndpoint!,
+            logger,
+            options.approvalWaitMs,
+          ),
+        (lateBrowser) => lateBrowser.close(),
+      );
+      try {
+        const client = cancellation.client(browser);
+        const result = await client.Target.getTargets();
+        return (result.targetInfos ?? []).map((target) => ({
+          targetId: target.targetId,
+          type: target.type,
+          url: target.url,
+          title: target.title,
+        }));
+      } finally {
+        await browser.close().catch(() => undefined);
+      }
+    });
   } finally {
-    await browser.close().catch(() => undefined);
+    cancellation.dispose();
   }
 }
 
@@ -631,31 +688,35 @@ export async function connectToRemoteChromeTarget(
     options.approvalWaitMs,
   );
   let targetId = options.targetId;
+  let createdTargetId: string | undefined;
   try {
     if (!targetId) {
       const created = await browser.Target.createTarget({
         url: options.targetUrl ?? "about:blank",
       });
       targetId = created.targetId;
+      createdTargetId = targetId;
       logger(`Opened dedicated remote Chrome tab targeting ${options.targetUrl ?? "about:blank"}`);
     }
     const attached = await browser.Target.attachToTarget({ targetId, flatten: true });
     const client = createSessionBoundChromeClient(browser, attached.sessionId);
+    let closing: Promise<void> | undefined;
     return {
       client,
       targetId,
       browserWSEndpoint: options.browserWSEndpoint,
-      close: async () => {
-        await browser.Target.detachFromTarget({ sessionId: attached.sessionId }).catch(
-          () => undefined,
-        );
-        if (options.closeTargetOnDispose && targetId) {
-          await browser.Target.closeTarget({ targetId }).catch(() => undefined);
-        }
-        await browser.close().catch(() => undefined);
-      },
+      close: (closeOptions) =>
+        (closing ??= (async () => {
+          if (options.closeTargetOnDispose && targetId && !closeOptions?.preserveTarget) {
+            await browser.Target.closeTarget({ targetId }).catch(() => undefined);
+          }
+          await client.close();
+        })()),
     };
   } catch (error) {
+    if (createdTargetId) {
+      await browser.Target.closeTarget({ targetId: createdTargetId }).catch(() => undefined);
+    }
     await browser.close().catch(() => undefined);
     throw error;
   }
@@ -668,38 +729,63 @@ async function connectToBrowserWebSocket(
   logger: BrowserLogger,
   approvalWaitMs?: number,
 ): Promise<ChromeClient> {
+  const acquire = () =>
+    acquireBrowserConnection(
+      browserWSEndpoint,
+      async () => (await CDP({ target: browserWSEndpoint, local: true })) as ChromeClient,
+    );
   if (!approvalWaitMs || approvalWaitMs <= 0) {
-    return (await CDP({ target: browserWSEndpoint, local: true })) as ChromeClient;
+    return acquire();
   }
 
-  logger(`Waiting for Chrome remote debugging approval for ${host}:${port}...`);
+  logger(`[browser] Waiting for Chrome remote debugging approval for ${host}:${port}...`);
 
-  const deadline = Date.now() + approvalWaitMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + approvalWaitMs;
+  const progress = setInterval(() => {
+    logger(
+      `[browser] Still waiting for Chrome remote debugging approval for ${host}:${port} (${formatApprovalWait(Date.now() - startedAt)} elapsed). Click Allow in an open Chrome window.`,
+    );
+  }, 15_000);
   let lastApprovalError: unknown;
-  while (Date.now() < deadline) {
-    const remainingMs = Math.max(1, deadline - Date.now());
-    try {
-      return await Promise.race([
-        CDP({ target: browserWSEndpoint, local: true }) as Promise<ChromeClient>,
-        new Promise<never>((_, reject) => {
-          setTimeout(() => {
-            reject(new Error("__oracle_remote_debugging_approval_timeout__"));
-          }, remainingMs);
-        }),
-      ]);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === "__oracle_remote_debugging_approval_timeout__"
-      ) {
-        break;
+  try {
+    while (Date.now() < deadline) {
+      const remainingMs = Math.max(1, deadline - Date.now());
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let expired = false;
+      try {
+        const connecting = acquire().then(async (client) => {
+          // Release this waiter; another request may still be awaiting the same approval.
+          if (expired) await client.close().catch(() => undefined);
+          return client;
+        });
+        return await Promise.race([
+          connecting,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+              expired = true;
+              reject(new Error("__oracle_remote_debugging_approval_timeout__"));
+            }, remainingMs);
+          }),
+        ]);
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "__oracle_remote_debugging_approval_timeout__"
+        ) {
+          break;
+        }
+        if (!isRemoteDebuggingApprovalError(error)) {
+          throw error;
+        }
+        lastApprovalError = error;
+      } finally {
+        clearTimeout(timeout);
       }
-      if (!isRemoteDebuggingApprovalError(error)) {
-        throw error;
-      }
-      lastApprovalError = error;
       await delay(Math.min(500, Math.max(0, deadline - Date.now())));
     }
+  } finally {
+    clearInterval(progress);
   }
   const suffix =
     lastApprovalError instanceof Error && lastApprovalError.message
@@ -712,7 +798,7 @@ async function connectToBrowserWebSocket(
 
 function isRemoteDebuggingApprovalError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /unexpected server response:\s*403|remote debugging|forbidden/i.test(message);
+  return /unexpected server response:\s*(?:403|404)\b|remote debugging|forbidden/i.test(message);
 }
 
 function formatApprovalWait(waitMs: number): string {
@@ -761,6 +847,33 @@ function createSessionBoundChromeClient(browser: ChromeClient, sessionId: string
     off?: (event: string, listener: (...args: unknown[]) => void) => void;
     removeListener: (event: string, listener: (...args: unknown[]) => void) => void;
   };
+  const events = new EventEmitter();
+  const bridges = new Map<string, (...args: unknown[]) => void>();
+  let closing: Promise<void> | undefined;
+  const remove = (name: string, listener: (...args: unknown[]) => void) => {
+    events.removeListener(name, listener);
+    if (events.listenerCount(name) === 0) {
+      const bridge = bridges.get(name);
+      if (bridge) browserWithEvents.removeListener(name, bridge);
+      bridges.delete(name);
+    }
+  };
+  const listen = (name: string, listener: (...args: unknown[]) => void, once = false) => {
+    if (closing) return () => {};
+    if (!bridges.has(name)) {
+      const bridge = (...args: unknown[]) => events.emit(name, ...args);
+      bridges.set(name, bridge);
+      browserWithEvents.on(name, bridge);
+    }
+    if (once) events.once(name, listener);
+    else events.on(name, listener);
+    return () => remove(name, listener);
+  };
+  const onDetached = (event: { sessionId?: string }) => {
+    if (event.sessionId === sessionId) events.emit("disconnect");
+  };
+  browserWithEvents.on("Target.detachedFromTarget", onDetached as (...args: unknown[]) => void);
+
   const bindDomain = <T extends object>(domainName: string): T => {
     const domain = (browser as unknown as Record<string, Record<string, unknown>>)[domainName] as
       | Record<string, unknown>
@@ -770,27 +883,34 @@ function createSessionBoundChromeClient(browser: ChromeClient, sessionId: string
       get(target, prop, receiver) {
         if (prop === "on") {
           return (name: string, listener: (...args: unknown[]) => void) => {
-            const domainEvent = (target as Record<string, unknown>)[name];
-            if (typeof domainEvent === "function") {
-              return (domainEvent as (...args: unknown[]) => unknown)(sessionId, listener);
-            }
-            browserWithEvents.on(eventName(name), listener);
-            return () => browserWithEvents.removeListener(eventName(name), listener);
+            return listen(eventName(name), listener);
           };
         }
         if (prop === "off" || prop === "removeListener") {
           return (name: string, listener: (...args: unknown[]) => void) => {
-            const off =
-              browserWithEvents.off ?? browserWithEvents.removeListener.bind(browserWithEvents);
-            off(eventName(name), listener);
+            remove(eventName(name), listener);
           };
         }
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") {
           return value;
         }
-        return (...args: unknown[]) =>
-          (value as (...callArgs: unknown[]) => unknown)(...args, sessionId);
+        if ((value as { category?: string }).category === "event") {
+          return (listener?: (...args: unknown[]) => void) =>
+            listener
+              ? listen(eventName(String(prop)), listener)
+              : new Promise((resolve) => listen(eventName(String(prop)), resolve, true));
+        }
+        return (...args: unknown[]) => {
+          if (closing) return Promise.reject(new Error("Chrome page session is closed."));
+          if (typeof args[0] === "function") {
+            return (value as (...callArgs: unknown[]) => unknown)({}, sessionId, args[0]);
+          }
+          if (typeof args[1] === "function") {
+            return (value as (...callArgs: unknown[]) => unknown)(args[0], sessionId, args[1]);
+          }
+          return (value as (...callArgs: unknown[]) => unknown)(...args, sessionId);
+        };
       },
     });
   };
@@ -810,15 +930,25 @@ function createSessionBoundChromeClient(browser: ChromeClient, sessionId: string
     Input: bindDomain("Input"),
     DOM: bindDomain("DOM"),
     Emulation: bindDomain("Emulation"),
-    on: browserWithEvents.on.bind(browserWithEvents),
-    once: browserWithEvents.once.bind(browserWithEvents),
-    off:
-      browserWithEvents.off?.bind(browserWithEvents) ??
-      browserWithEvents.removeListener.bind(browserWithEvents),
-    removeListener: browserWithEvents.removeListener.bind(browserWithEvents),
-    close: async () => {
-      await browser.Target.detachFromTarget({ sessionId }).catch(() => undefined);
-    },
+    on: (name: string, listener: (...args: unknown[]) => void) => listen(name, listener),
+    once: (name: string, listener: (...args: unknown[]) => void) => listen(name, listener, true),
+    off: remove,
+    removeListener: remove,
+    close: () =>
+      (closing ??= (async () => {
+        for (const [name, bridge] of bridges) browserWithEvents.removeListener(name, bridge);
+        bridges.clear();
+        events.removeAllListeners();
+        browserWithEvents.removeListener(
+          "Target.detachedFromTarget",
+          onDetached as (...args: unknown[]) => void,
+        );
+        try {
+          await browser.Target.detachFromTarget({ sessionId }).catch(() => undefined);
+        } finally {
+          await browser.close();
+        }
+      })()),
   } as ChromeClient;
 }
 
@@ -1101,8 +1231,10 @@ export function buildChromeFlagsForTest(
 function resolveChromeLaunchOptions(
   chromeFlags: string[],
   usingCopiedProfile: boolean,
+  manualLogin = false,
+  platform: NodeJS.Platform = process.platform,
 ): { chromeFlags: string[]; ignoreDefaultFlags: boolean } {
-  if (!usingCopiedProfile) {
+  if (!usingCopiedProfile && !(manualLogin && platform === "darwin")) {
     return { chromeFlags, ignoreDefaultFlags: false };
   }
   return {
@@ -1116,8 +1248,10 @@ function resolveChromeLaunchOptions(
 export function resolveChromeLaunchOptionsForTest(
   chromeFlags: string[],
   usingCopiedProfile: boolean,
+  manualLogin = false,
+  platform: NodeJS.Platform = process.platform,
 ): { chromeFlags: string[]; ignoreDefaultFlags: boolean } {
-  return resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile);
+  return resolveChromeLaunchOptions(chromeFlags, usingCopiedProfile, manualLogin, platform);
 }
 
 function parseDebugPortEnv(): number | null {
@@ -1128,6 +1262,21 @@ function parseDebugPortEnv(): number | null {
     return null;
   }
   return value;
+}
+
+export async function findEphemeralPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close((error) => {
+        if (error) reject(error);
+        else if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Failed to acquire ephemeral port"));
+      });
+    });
+  });
 }
 
 async function launchWithCustomHost({

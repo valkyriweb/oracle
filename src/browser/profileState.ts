@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { delay } from "./utils.js";
+import { formatWebSocketHost } from "./detect.js";
 
 export type ProfileStateLogger = (message: string) => void;
 
@@ -258,7 +259,11 @@ export async function readProcessStartTimeMs(pid: number): Promise<number | null
   if (Math.trunc(pid) === process.pid) {
     // Use the same OS identity as peer controllers, not wall time minus uptime.
     // Cache our own PID only: it cannot be reused during this process's lifetime.
-    return (ownProcessStartTime ??= queryProcessStartTimeMs(process.pid));
+    return (ownProcessStartTime ??= queryProcessStartTimeMs(process.pid).then((startedAt) => {
+      // A transient probe failure is not a permanent process identity.
+      if (startedAt === null) ownProcessStartTime = undefined;
+      return startedAt;
+    }));
   }
   return queryProcessStartTimeMs(pid);
 }
@@ -279,6 +284,8 @@ async function queryProcessStartTimeMs(pid: number): Promise<number | null> {
       maxBuffer: 1024 * 1024,
       windowsHide: true,
       timeout: 5000,
+      // Keep ps timestamps parseable regardless of the user's locale.
+      env: { ...process.env, LC_ALL: "C" },
     });
     const startedAt = Date.parse(String(stdout ?? "").trim());
     return Number.isFinite(startedAt) ? startedAt : null;
@@ -319,6 +326,7 @@ export async function acquireProfileRunLock(
     pollMs?: number;
     logger?: ProfileStateLogger;
     sessionId?: string;
+    signal?: AbortSignal;
   },
 ): Promise<ProfileRunLock | null> {
   const timeoutMs = options.timeoutMs;
@@ -335,6 +343,7 @@ export async function acquireProfileRunLock(
   let warned = false;
 
   for (;;) {
+    options.signal?.throwIfAborted();
     try {
       const payload: ProfileRunLockRecord = {
         pid: process.pid,
@@ -358,7 +367,7 @@ export async function acquireProfileRunLock(
       let existing = parseProfileRunLock(await readFile(lockPath, "utf8").catch(() => null));
       if (!existing) {
         // Likely partial write / corruption; re-read once, then delete (user preference: delete unreadable lockfiles).
-        await delay(200);
+        await delay(200, options.signal);
         existing = parseProfileRunLock(await readFile(lockPath, "utf8").catch(() => null));
         if (!existing) {
           options.logger?.("Oracle profile lock unreadable; deleting lockfile.");
@@ -383,7 +392,7 @@ export async function acquireProfileRunLock(
           `Oracle profile lock still held by pid ${existing.pid} after ${Math.round(elapsed / 1000)}s`,
         );
       }
-      await delay(Math.min(pollMs, timeoutMs - elapsed));
+      await delay(Math.min(pollMs, timeoutMs - elapsed), options.signal);
     }
   }
 }
@@ -416,17 +425,22 @@ export async function verifyDevToolsReachable({
   attempts?: number;
   timeoutMs?: number;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-  const versionUrl = `http://${host}:${port}/json/version`;
+  const versionUrl = `http://${formatWebSocketHost(host)}:${port}/json/version`;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      const response = await fetch(versionUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      try {
+        const response = await fetch(versionUrl, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return { ok: true };
+      } finally {
+        // Headers can arrive before a stalled body; bound and clean up the whole request.
+        clearTimeout(timeout);
+        controller.abort();
       }
-      return { ok: true };
     } catch (error) {
       if (attempt < attempts - 1) {
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
