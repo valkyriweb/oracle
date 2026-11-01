@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- CLI: reject overflowing numeric timeouts instead of accepting infinity; finite fractional-second timeouts remain supported.
+
 - Fork/browser: add browser-only GPT-6 Astra aliases, select the current `Latest` model row only with verified GPT-6 UI evidence, and keep Pro as an independently verified thinking effort. Merge upstream 0.18.1 and subsequent browser fixes while preserving subscription/Claude-bridge behavior.
 - Release: attach the npm tarball and its checksums to the GitHub Release and verify them before the Homebrew tap updates, so the formula no longer points at a missing asset. Fixes #443.
 - Browser: tolerate macOS openrsync vanished-file transfers when copying live Chrome profiles, while rejecting real read errors and missing authentication storage; fixes #550, thanks @Sogl.
