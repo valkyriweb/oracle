@@ -153,6 +153,12 @@ describe("parseHeartbeatOption", () => {
 });
 
 describe("parseTimeoutOption", () => {
+  test("rejects numeric overflow while preserving finite fractional seconds", () => {
+    expect(() => parseTimeoutOption("9".repeat(400))).toThrow(InvalidArgumentError);
+    expect(() => parseTimeoutOption(`${"9".repeat(400)}s`)).toThrow(InvalidArgumentError);
+    expect(parseTimeoutOption("0.5")).toBe(0.5);
+  });
+
   test("keeps bare numbers as seconds", () => {
     expect(parseTimeoutOption("10")).toBe(10);
     expect(parseTimeoutOption("1.5")).toBe(1.5);
