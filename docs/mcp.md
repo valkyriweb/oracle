@@ -113,7 +113,7 @@ The MCP response includes `structuredContent.images[]` with the saved file path,
   - `pnpm mcp` (or `oracle-mcp` in the repo root)
 - Shared HTTP server (one process for many agent sessions):
   - `oracle-mcp --http [port]` (or `ORACLE_MCP_HTTP_PORT=8765 oracle-mcp`) serves streamable HTTP at `http://127.0.0.1:<port>/mcp` (default port 8765; `ORACLE_MCP_HTTP_HOST` changes the bind address) plus `GET /healthz`.
-  - Each request is served by a fresh stateless MCP server instance, so concurrent clients never share protocol state; sessions persist on disk as usual.
+  - Each client gets its own MCP server instance (a sessionful transport for 2025-era clients, a per-request instance for 2026-07-28 clients), so concurrent clients never share protocol state and cancellations reach the right call. Idle legacy sessions are dropped after 6 hours. Oracle sessions persist on disk as usual.
   - Point clients at the URL instead of spawning stdio copies, e.g. Claude Code: `{ "type": "http", "url": "http://127.0.0.1:8765/mcp" }`.
   - No auth is applied; keep it bound to loopback.
 - mcporter example (stdio):

@@ -1,4 +1,7 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { Client as LegacyClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport as LegacyHttpTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -69,6 +72,54 @@ describe("oracle-mcp streamable HTTP transport", () => {
       expect(result.isError).toBeFalsy();
     }
     await Promise.all(clients.map((client) => client.close()));
+  });
+
+  test("routes legacy cancellation to the server instance running the call", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "oracle-mcp-http-"));
+    const dir = path.join(home, "sessions", "pending-session");
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify({
+        id: "pending-session",
+        createdAt: new Date().toISOString(),
+        status: "running",
+        model: "gpt-5.4",
+        mode: "api",
+        cwd: home,
+        options: { prompt: "pending", file: [], model: "gpt-5.4" },
+      }),
+    );
+    await writeFile(path.join(dir, "output.log"), "");
+    await writeFile(path.join(dir, "request.json"), JSON.stringify({ prompt: "pending" }));
+    const previousHome = process.env.ORACLE_HOME_DIR;
+    process.env.ORACLE_HOME_DIR = home;
+    const client = new LegacyClient({ name: "http-cancel-proof", version: "1.0.0" });
+    const transport = new LegacyHttpTransport(new URL(`${base}/mcp`));
+    await client.connect(transport);
+    try {
+      const session = server.legacySessions.get(transport.sessionId ?? "");
+      expect(session).toBeDefined();
+      const controllers = (
+        session!.server.server as unknown as {
+          _requestHandlerAbortControllers: Map<unknown, unknown>;
+        }
+      )._requestHandlerAbortControllers;
+      const abort = new AbortController();
+      const call = client
+        .callTool({ name: "wait", arguments: { id: "pending-session" } }, undefined, {
+          signal: abort.signal,
+        })
+        .catch((error: unknown) => error);
+      await expect.poll(() => controllers.size, { timeout: 5_000 }).toBe(1);
+      abort.abort();
+      await call;
+      await expect.poll(() => controllers.size, { timeout: 5_000 }).toBe(0);
+    } finally {
+      await client.close();
+      if (previousHome === undefined) delete process.env.ORACLE_HOME_DIR;
+      else process.env.ORACLE_HOME_DIR = previousHome;
+    }
   });
 
   test("parses --http and env port", () => {

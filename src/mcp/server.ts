@@ -2,10 +2,13 @@
 import "dotenv/config";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
 import {
   createMcpHandler,
+  isLegacyRequest,
+  WebStandardStreamableHTTPServerTransport,
   hostHeaderValidationResponse,
   localhostAllowedHostnames,
   localhostAllowedOrigins,
@@ -56,14 +59,21 @@ export interface McpHttpServerOptions {
  * clients and tool calls never share in-memory protocol state; Oracle session
  * state lives on disk as before.
  */
-export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Promise<Server> {
+export type McpHttpServer = Server & { legacySessions: Map<string, LegacySession> };
+
+export async function startMcpHttpServer(
+  options: McpHttpServerOptions = {},
+): Promise<McpHttpServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8765;
   const mcpPath = options.path ?? "/mcp";
-  const handler = createMcpHandler(createMcpServer, {
-    legacy: "stateless",
-    onerror: (error) => console.error("MCP transport error:", error),
-  });
+  const onerror = (error: Error) => console.error("MCP transport error:", error);
+  // Modern (2026-07-28) traffic is per-request by design; cancellation aborts
+  // the request itself. Legacy (2025) clients get a sessionful transport per
+  // client so notifications/cancelled reaches the server instance running the
+  // call, while different clients stay isolated.
+  const modern = createMcpHandler(createMcpServer, { legacy: "reject", onerror });
+  const legacy = createLegacySessionRouter(onerror);
   const allowedHosts = [...localhostAllowedHostnames(), ...(isLoopback(host) ? [] : [host])];
   const allowedOrigins = localhostAllowedOrigins();
   const server = createServer(async (req, res) => {
@@ -97,7 +107,11 @@ export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Pr
       const rejection =
         hostHeaderValidationResponse(request, allowedHosts) ??
         originValidationResponse(request, allowedOrigins);
-      const response = rejection ?? (await handler.fetch(request));
+      const response =
+        rejection ??
+        ((await isLegacyRequest(request))
+          ? await legacy.fetch(request)
+          : await modern.fetch(request));
       res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
       if (!response.body) {
         res.end();
@@ -116,12 +130,118 @@ export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Pr
   // Long consults stream for many minutes; do not time out idle sockets.
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
+  const shared = Object.assign(server, { legacySessions: legacy.sessions });
+  server.on("close", () => {
+    void legacy.close();
+    void modern.close();
+  });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => resolve());
   });
   console.error(`oracle-mcp listening on http://${host}:${port}${mcpPath}`);
-  return server;
+  return shared;
+}
+
+const LEGACY_SESSION_IDLE_MS = 6 * 60 * 60 * 1000;
+
+export interface LegacySession {
+  transport: WebStandardStreamableHTTPServerTransport;
+  server: McpServer;
+  lastSeen: number;
+  inflight: number;
+}
+
+function jsonRpcError(status: number, message: string): Response {
+  return new Response(
+    JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }),
+    { status, headers: { "content-type": "application/json" } },
+  );
+}
+
+export function createLegacySessionRouter(onerror: (error: Error) => void) {
+  const sessions = new Map<string, LegacySession>();
+  const closeSession = async (id: string) => {
+    const session = sessions.get(id);
+    if (!session) return;
+    sessions.delete(id);
+    await session.server.close().catch(onerror);
+  };
+  // Clients that vanish without DELETE would otherwise leak sessions.
+  const sweep = setInterval(() => {
+    const cutoff = Date.now() - LEGACY_SESSION_IDLE_MS;
+    for (const [id, session] of sessions) {
+      if (session.inflight === 0 && session.lastSeen < cutoff) void closeSession(id);
+    }
+  }, 60_000);
+  sweep.unref();
+
+  const track = async (session: LegacySession, request: Request) => {
+    session.inflight += 1;
+    session.lastSeen = Date.now();
+    try {
+      const response = await session.transport.handleRequest(request);
+      // Keep the session marked busy while an SSE body is still streaming.
+      if (!response.body) return response;
+      const reader = response.body.getReader();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            session.inflight -= 1;
+            session.lastSeen = Date.now();
+            return;
+          }
+          controller.enqueue(value);
+        },
+        async cancel(reason) {
+          session.inflight -= 1;
+          await reader.cancel(reason);
+        },
+      });
+      return new Response(body, { status: response.status, headers: response.headers });
+    } catch (error) {
+      session.inflight -= 1;
+      throw error;
+    }
+  };
+
+  return {
+    sessions,
+    async fetch(request: Request): Promise<Response> {
+      const id = request.headers.get("mcp-session-id");
+      if (id) {
+        const session = sessions.get(id);
+        if (!session) return jsonRpcError(404, "Session not found");
+        return track(session, request);
+      }
+      if (request.method !== "POST") return jsonRpcError(400, "Missing mcp-session-id");
+      const server = createMcpServer();
+      const session: LegacySession = {
+        server,
+        lastSeen: Date.now(),
+        inflight: 0,
+        transport: new WebStandardStreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newId) => {
+            sessions.set(newId, session);
+          },
+          onsessionclosed: (closedId) => {
+            void closeSession(closedId);
+          },
+        }),
+      };
+      await server.connect(session.transport);
+      const response = await track(session, request);
+      if (!session.transport.sessionId) await server.close().catch(onerror);
+      return response;
+    },
+    async close(): Promise<void> {
+      clearInterval(sweep);
+      await Promise.all([...sessions.keys()].map(closeSession));
+    },
+  };
 }
 
 function isLoopback(host: string): boolean {
