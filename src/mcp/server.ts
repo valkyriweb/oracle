@@ -4,7 +4,14 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
-import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import {
+  createMcpHandler,
+  hostHeaderValidationResponse,
+  localhostAllowedHostnames,
+  localhostAllowedOrigins,
+  McpServer,
+  originValidationResponse,
+} from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { getCliVersion } from "../version.js";
 import { registerChatGptImageTool } from "./tools/chatgptImage.js";
@@ -57,6 +64,8 @@ export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Pr
     legacy: "stateless",
     onerror: (error) => console.error("MCP transport error:", error),
   });
+  const allowedHosts = [...localhostAllowedHostnames(), ...(isLoopback(host) ? [] : [host])];
+  const allowedOrigins = localhostAllowedOrigins();
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `${host}:${port}`}`);
@@ -84,7 +93,11 @@ export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Pr
         // @ts-expect-error Node requires duplex for streamed request bodies.
         duplex: "half",
       });
-      const response = await handler.fetch(request);
+      // DNS-rebinding / cross-site protection: only loopback Host and Origin.
+      const rejection =
+        hostHeaderValidationResponse(request, allowedHosts) ??
+        originValidationResponse(request, allowedOrigins);
+      const response = rejection ?? (await handler.fetch(request));
       res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
       if (!response.body) {
         res.end();
@@ -109,6 +122,10 @@ export async function startMcpHttpServer(options: McpHttpServerOptions = {}): Pr
   });
   console.error(`oracle-mcp listening on http://${host}:${port}${mcpPath}`);
   return server;
+}
+
+function isLoopback(host: string): boolean {
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
 export function parseHttpArgs(

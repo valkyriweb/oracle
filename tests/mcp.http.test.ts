@@ -22,6 +22,33 @@ describe("oracle-mcp streamable HTTP transport", () => {
     expect((await fetch(`${base}/nope`)).status).toBe(404);
   });
 
+  test("rejects non-loopback Host and Origin headers", async () => {
+    const init = (headers: Record<string, string>) => ({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...headers,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect((await fetch(`${base}/mcp`, init({ origin: "https://evil.example" }))).status).toBe(403);
+    const { request } = await import("node:http");
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(
+        `${base}/mcp`,
+        { ...init({}), headers: { ...init({}).headers, host: "evil.example" } },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.end(init({}).body);
+    });
+    expect(status).toBe(403);
+  });
+
   test("serves several concurrent clients from one process", async () => {
     const clients = await Promise.all(
       Array.from({ length: 4 }, async (_, i) => {
