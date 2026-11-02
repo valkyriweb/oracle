@@ -117,8 +117,31 @@ export async function startMcpHttpServer(
         res.end();
         return;
       }
-      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-        res.write(chunk);
+      // Send headers now: SSE streams may not write a byte for a long time.
+      res.flushHeaders();
+      // Cancel the body when the client disconnects so SSE streams, keepalive
+      // timers and session bookkeeping are released.
+      const reader = response.body.getReader();
+      let clientGone = false;
+      res.on("close", () => {
+        if (res.writableFinished) return;
+        clientGone = true;
+        void reader.cancel(new Error("client disconnected")).catch(() => {});
+      });
+      while (!clientGone) {
+        const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+        if (done) break;
+        if (!res.write(value)) {
+          await new Promise<void>((resolve) => {
+            const resume = () => {
+              res.off("drain", resume);
+              res.off("close", resume);
+              resolve();
+            };
+            res.on("drain", resume);
+            res.on("close", resume);
+          });
+        }
       }
       res.end();
     } catch (error) {
@@ -179,32 +202,47 @@ export function createLegacySessionRouter(onerror: (error: Error) => void) {
   const track = async (session: LegacySession, request: Request) => {
     session.inflight += 1;
     session.lastSeen = Date.now();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      session.inflight -= 1;
+      session.lastSeen = Date.now();
+    };
+    let response: Response;
     try {
-      const response = await session.transport.handleRequest(request);
-      // Keep the session marked busy while an SSE body is still streaming.
-      if (!response.body) return response;
-      const reader = response.body.getReader();
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
+      response = await session.transport.handleRequest(request);
+    } catch (error) {
+      finish();
+      throw error;
+    }
+    if (!response.body) {
+      finish();
+      return response;
+    }
+    // Keep the session marked busy while an SSE body is still streaming.
+    const reader = response.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
           const { done, value } = await reader.read();
           if (done) {
+            finish();
             controller.close();
-            session.inflight -= 1;
-            session.lastSeen = Date.now();
             return;
           }
           controller.enqueue(value);
-        },
-        async cancel(reason) {
-          session.inflight -= 1;
-          await reader.cancel(reason);
-        },
-      });
-      return new Response(body, { status: response.status, headers: response.headers });
-    } catch (error) {
-      session.inflight -= 1;
-      throw error;
-    }
+        } catch (error) {
+          finish();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        finish();
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(body, { status: response.status, headers: response.headers });
   };
 
   return {

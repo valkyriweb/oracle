@@ -122,6 +122,38 @@ describe("oracle-mcp streamable HTTP transport", () => {
     }
   });
 
+  test("releases legacy sessions' inflight count after notifications and disconnects", async () => {
+    const client = new LegacyClient({ name: "http-inflight-proof", version: "1.0.0" });
+    const transport = new LegacyHttpTransport(new URL(`${base}/mcp`));
+    await client.connect(transport);
+    const id = transport.sessionId ?? "";
+    const session = server.legacySessions.get(id);
+    expect(session).toBeDefined();
+    await client.listTools();
+    // The legacy client keeps a standalone GET SSE stream open; nothing else.
+    await expect.poll(() => session!.inflight, { timeout: 5_000 }).toBeLessThanOrEqual(1);
+    await client.close();
+    await expect.poll(() => session!.inflight, { timeout: 5_000 }).toBe(0);
+    // Reopening the standalone stream for the same session must not 409.
+    const controller = new AbortController();
+    const reopen = () =>
+      fetch(`${base}/mcp`, {
+        headers: {
+          accept: "text/event-stream",
+          "mcp-session-id": id,
+          "mcp-protocol-version": "2025-06-18",
+        },
+        signal: controller.signal,
+      });
+    let reopened = await reopen();
+    for (let i = 0; i < 20 && reopened.status === 409; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      reopened = await reopen();
+    }
+    expect(reopened.status).toBe(200);
+    controller.abort();
+  });
+
   test("parses --http and env port", () => {
     expect(parseHttpArgs([], {})).toBeNull();
     expect(parseHttpArgs(["--http"], {})).toEqual({ host: undefined });
