@@ -16,6 +16,10 @@ and run the live API suite before shipping major transport changes.
 
 ## Test Cases
 
+### Assistant response recovery (no login)
+
+Run `pnpm build && node scripts/assistant-runtime-proof.mjs` with Chrome installed (`CHROME_PATH` can select Chromium on Linux). The built CLI exercises stale-answer replacement, delayed recheck recovery, and expired-session errors through both local and remote Chrome runners. Each synthetic consultation submits exactly once and records the expected completed or error session. Use `--captures <directory>` to retain CLI output. These disposable profiles and local pages do not establish signed-in provider behavior.
+
 ### Recovered tab retirement
 
 Run `pnpm build && node scripts/recovery-retirement-proof.mjs` for built-CLI harvests against isolated Chrome. The synthetic matrix checks full-answer persistence before owned-tab retirement and preservation of a peer, borrowed/kept targets, active controllers, and the current generation stop control.
@@ -360,3 +364,7 @@ These Vitest cases hit the real OpenAI API to exercise both transports:
 
 Skip these unless you're intentionally validating the production API; they are
 fully gated behind `ORACLE_LIVE_TEST=1` to avoid accidental CI runs.
+
+### Opt-in background browser input
+
+Run `node --import tsx scripts/browser-no-focus-proof.mjs` after installing development dependencies. It uses a disposable, signed-out Chrome profile and synthetic text/file inputs to compare default foreground behavior with `noFocus: true`, including the final-page cleanup replacement. On macOS, Peekaboo must be installed with a working native GUI bridge: the proof focuses Finder, samples the frontmost PID throughout launch, target creation, both trusted sends, and cleanup, and asserts that the opt-in run retains it. On Linux the proof runs headless and checks trusted submissions and cleanup; it does not claim native foreground-retention evidence. No provider login is used.
