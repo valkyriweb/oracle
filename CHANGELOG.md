@@ -3,20 +3,74 @@
 ## Unreleased
 
 - CLI: reject overflowing numeric timeouts instead of accepting infinity; finite fractional-second timeouts remain supported.
+- Fork/browser: add browser-only GPT-6 Astra aliases, select the current `Latest` model row only with verified GPT-6 UI evidence, and keep Pro as an independently verified thinking effort. Preserves subscription/Claude-bridge behavior.
+- Browser: recognize current ChatGPT composer controls, scoped Web Search menu rows, and semantic search pills; support English and Simplified Chinese labels while preserving navigation and full-prompt verification. Thanks @xiaozhi747 (#608).
 
-- Fork/browser: add browser-only GPT-6 Astra aliases, select the current `Latest` model row only with verified GPT-6 UI evidence, and keep Pro as an independently verified thinking effort. Merge upstream 0.18.1 and subsequent browser fixes while preserving subscription/Claude-bridge behavior.
-- Release: attach the npm tarball and its checksums to the GitHub Release and verify them before the Homebrew tap updates, so the formula no longer points at a missing asset. Fixes #443.
-- Browser: tolerate macOS openrsync vanished-file transfers when copying live Chrome profiles, while rejecting real read errors and missing authentication storage; fixes #550, thanks @Sogl.
+- Dependencies: update dotenv, the MCP SDK 1.x development client, and es-toolkit after the two-day cooldown; retain Node >=24 and Undici 7.
+
+## 0.22.2 - 2026-10-26
+
+**Highlights:** Recover failed ChatGPT page loads, honor explicit Pro effort requests, and include security fixes for Undici, fast-uri, and body-parser.
+
+- Browser: retry a failed ChatGPT page load once, distinguish unloaded pages from signed-out sessions, and print sanitized login diagnostics; thanks @postoso.
+- MCP: keep an explicit GPT-6 Pro model request above saved browser effort defaults while preserving per-call overrides and current/ignore strategies; thanks @AgentSMLA.
+- Browser: recognize separator-joined warning codes such as `cloudflare_challenge` and `rate_limit_exceeded` in timeout diagnostics; thanks @etafund.
+- Dependencies: update Undici to 7.30.1 for upstream security fixes and refresh OpenAI, Google GenAI, MCP, Puppeteer, and DevTools types after the two-day cooldown; retain Node >=24.
+- Dependencies: update fast-uri to 4.2.3 and body-parser to 2.4.0 for upstream URI handling and compressed-request security fixes.
+
+[npm](https://www.npmjs.com/package/@steipete/oracle/v/0.22.2) · [Registry tarball](https://registry.npmjs.org/@steipete/oracle/-/oracle-0.22.2.tgz) · [Integrity metadata](https://registry.npmjs.org/@steipete%2foracle/0.22.2) · [CI proof](https://github.com/steipete/oracle/actions/runs/40343747307)
+
+## 0.22.1 - 2026-10-23
+
+**Highlights:** Keep authenticated ChatGPT sessions working despite stray login controls and restore compatible terminal progress updates.
+
+- Browser: accept confirmed ChatGPT sessions with a visible authenticated app despite stray login controls, while preserving sign-out and auth-page checks.
+- CLI: update Markdansi to 0.3.7 and restore compatible updates after its terminal OSC progress replay fix.
+- Dependencies: refresh OpenAI, Inquirer, Puppeteer/DevTools types, and formatter/linter tooling after the two-day cooldown; retain Node >=24 and Undici 7.
+
+[npm](https://www.npmjs.com/package/@steipete/oracle/v/0.22.1) · [Registry tarball](https://registry.npmjs.org/@steipete/oracle/-/oracle-0.22.1.tgz) · [Integrity metadata](https://registry.npmjs.org/@steipete%2foracle/0.22.1) · [CI proof](https://github.com/steipete/oracle/actions/runs/40015517941)
+
+## 0.22.0 - 2026-10-20
+
+**Highlights:** Run ChatGPT in the background with opt-in no-focus mode, capture localized replies reliably, and harden browser-host and remote-request security.
+
+- Browser: add opt-in `--browser-no-focus` / `browser.noFocus` for background ChatGPT runs, attachment submission, and recovery; preserve foreground defaults, retain shared browser transports, and bring Chrome forward when sign-in or a challenge requires input; thanks @postoso and @Eotel.
+- Browser: recognize Chinese completion announcements and localized controls beside search-unit replies while preserving current-turn and code-block guards; thanks @oraclexing.
+- Browser: retry one unavailable process-identity query before final shared Chrome cleanup, while continuing to refuse termination for mismatched or unverifiable processes.
+- Browser: attach and harvest only HTTPS tabs on the exact ChatGPT hosts, rejecting lookalike hosts and unrelated pages titled ChatGPT; thanks @SebTardif.
+- Serve: reject oversized remote run bodies with HTTP 413 before starting a browser run, including unfinished chunked uploads; thanks @SebTardif.
+- Dependencies: update the OpenAI SDK to 7.38.0 and GPT tokenization to 4.1.0 after the two-day cooldown; retain Node >=24 and Undici 7.
+- Browser: keep incomplete answers pending when thinking-state reads fail, file URLs appear in streaming text, or Deep Research still shows Stop; preserve the remaining timeout during observer recovery and reject unowned completed research frames; thanks @SebTardif.
+- Browser: support Japanese attachment cards, collision-renamed upload receipts, and the Japanese send control; scope cleanup, receipts, readiness, and sending to the active composer so sibling forms and attachments remain untouched; thanks @kiyo-e.
+- Browser: avoid extending failed prompt waits on lookalike OpenAI auth hosts while preserving manual-login waits on the real auth domain; thanks @SebTardif.
+- Dependencies: refresh Gemini and OpenAI SDKs, GPT tokenization, Vitest/coverage, and DevTools protocol within the two-day cooldown; retain Node >=24 and Undici 7.
+- CI: use Xcode 27 runners for macOS tests and release packaging while retaining the notifier's explicit macOS 13 deployment target.
+- Dependencies: refresh the OpenAI SDK, dotenv, qs, Puppeteer and DevTools types within the two-day cooldown, plus CI and release action pins; retain Node >=24 and Undici 7.
+
+## 0.21.6 - 2026-10-16
+
+**Highlights:** Report failed browser answers correctly and recover completed Deep Research reports without reopening Chrome.
+
+- Browser: reject terminal “Thinking failed” turns with or without Retry instead of saving them as successful answers, while preserving ordinary prose and active-generation safeguards; fixes #565, thanks @postoso.
+- CLI: skip stale Deep Research tool-call wrappers after automatic reattachment so completed sessions display the recovered report without reopening Chrome; thanks @devYRPauli.
+- CLI: keep session listings newest-first when legacy metadata lacks a creation time, point truncation hints at supported flags, and list the missing browser controls in advanced help; thanks @postoso.
+- Dependencies: refresh provider and MCP SDKs, validation and terminal helpers, lint/test tooling, DevTools protocol, and the Hono adapter, URI parser, protobuf and Vite overrides within the two-day cooldown; retain Node >=24 and Undici 7.
+
+## 0.21.5 - 2026-10-11
+
+**Highlights:** Reliable Chrome recovery and cleanup, faster file bundles, and the source-map-js security fix (CVE-2026-93749).
+
 - Browser: release Chrome launched by session recovery according to `keepBrowser`, preserve borrowed browsers and concurrent leases, and show manual-login guidance with hidden-window recovery; fixes #548 and #547, thanks @HidakaKoyo.
-- Browser: capture generated images from current-prompt ChatGPT blob galleries and download their bytes inside the page, preventing image-generation timeouts on the new layout; fixes #549, thanks @HidakaKoyo.
-
-- Browser: recognize GPT-6 picker labels, preserve the latest CLI alias and legacy localized radios, and verify model and Pro effort separately; fixes #553, thanks @felipekrgb.
 - Browser: use fresh cold-launch ports and live attach endpoints, wait for HTTP 404 approval responses, exclude volatile copied-profile session state while preserving auth storage, and report partial cookie transfers safely; fixes #535, #537, #538, and #540, improves #541; thanks @webkitvn and @Sogl.
-- Browser: dismiss blocking UI only inside visible dialogs, so a sidebar conversation whose title contains a word like "close" is no longer clicked after opening a ChatGPT project URL; fixes #534, thanks @tlq5l and @webkitvn.
+- Browser: capture generated images from current-prompt ChatGPT blob galleries and download their bytes inside the page, preventing image-generation timeouts on the new layout; fixes #549, thanks @HidakaKoyo.
 - Files: look for `.gitignore` files only in the directories and glob bases passed to `--file` and their parents under the working directory, instead of walking the whole working directory, so a small bundle no longer takes seconds to minutes when oracle runs from a home directory, and stop a `.gitignore` in `foo/` from applying to files in a sibling `foobar/`; fixes #532, thanks @postoso.
-- Browser: recognize Japanese Chat/Work effort controls and assistant completion/copy signals while preserving current-turn verification; thanks @kiyo-e.
-- Dependencies: refresh provider and MCP SDKs, Chrome tooling, terminal dependencies, Vitest/coverage, Hono, Vite, and the source-map-js security fix (CVE-2026-93749) within the two-day cooldown; retain Node >=24 and Undici 7 compatibility; thanks @dependabot.
 - Files: apply default-ignored directory names only below the directory or glob base passed to `--file`, so a bundle under `/tmp` or a `build/` folder is no longer dropped when oracle runs from elsewhere; fixes #531, thanks @postoso.
+- Browser: dismiss blocking UI only inside visible dialogs, so a sidebar conversation whose title contains a word like "close" is no longer clicked after opening a ChatGPT project URL; fixes #534, thanks @tlq5l and @webkitvn.
+- Browser: recognize GPT-6 picker labels, preserve the latest CLI alias and legacy localized radios, and verify model and Pro effort separately; fixes #553, thanks @felipekrgb.
+- Browser: recognize Japanese Chat/Work effort controls and assistant completion/copy signals while preserving current-turn verification; thanks @kiyo-e.
+- Browser: tolerate macOS openrsync vanished-file transfers when copying live Chrome profiles, while rejecting real read errors and missing authentication storage; fixes #550, thanks @Sogl.
+- Dependencies: refresh provider and MCP SDKs, Chrome tooling, terminal dependencies, Vitest/coverage, Hono, Vite, and the source-map-js security fix (CVE-2026-93749) within the two-day cooldown; retain Node >=24 and Undici 7 compatibility; thanks @dependabot.
+- Dependencies: refresh OpenAI and Gemini SDKs, Puppeteer, and the pinned Chrome DevTools protocol within the two-day cooldown, retaining Node >=24 and Undici 7.
 
 ## 0.21.4 - 2026-10-01
 
