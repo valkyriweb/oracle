@@ -263,6 +263,20 @@ describe("summarizeModelRunsForConsult", () => {
     },
   );
 
+  // MCP sessions record the no-focus setting they ran with; the default is off.
+  test.each([
+    { browser: {}, expected: false },
+    { browser: { noFocus: false }, expected: false },
+    { browser: { noFocus: true }, expected: true },
+  ])("records the resolved no-focus setting for config $browser", ({ browser, expected }) => {
+    const config = buildConsultBrowserConfig({
+      userConfig: { browser },
+      env: {},
+      runModel: "gpt-5.5",
+    });
+    expect(JSON.parse(JSON.stringify(config)).noFocus).toBe(expected);
+  });
+
   test("selects GPT-6 through MCP including explicit strategy overrides", () => {
     expect(
       buildConsultBrowserConfig({ userConfig: {}, env: {}, runModel: "gpt-6-astra" }),
@@ -413,6 +427,69 @@ describe("summarizeModelRunsForConsult", () => {
       thinkingTime: "pro",
     });
   });
+
+  test.each(["standard", "extended"] as const)(
+    "keeps explicit MCP GPT-6 Pro above saved %s effort",
+    (thinkingTime) => {
+      const config = buildConsultBrowserConfig({
+        userConfig: { browser: { thinkingTime } },
+        env: {},
+        runModel: "gpt-6-pro",
+        inputModel: "gpt-6-pro",
+        browserModelStrategy: "select",
+      });
+
+      expect(config).toMatchObject({
+        desiredModel: "GPT-6",
+        thinkingTime: "pro",
+        modelStrategy: "select",
+      });
+    },
+  );
+
+  test("lets explicit MCP effort override GPT-6 Pro and saved effort", () => {
+    const config = buildConsultBrowserConfig({
+      userConfig: { browser: { thinkingTime: "extended" } },
+      env: {},
+      runModel: "gpt-6-pro",
+      inputModel: "gpt-6-pro",
+      browserThinkingTime: "standard",
+      browserModelStrategy: "select",
+    });
+
+    expect(config).toMatchObject({ desiredModel: "GPT-6", thinkingTime: "standard" });
+  });
+
+  test("preserves saved effort when the MCP GPT-6 Pro model is omitted", () => {
+    const config = buildConsultBrowserConfig({
+      userConfig: { model: "gpt-6-pro", browser: { thinkingTime: "standard" } },
+      env: {},
+      runModel: "gpt-6-pro",
+      browserModelStrategy: "select",
+    });
+
+    expect(config).toMatchObject({ desiredModel: "GPT-6", thinkingTime: "standard" });
+  });
+
+  test.each(["current", "ignore"] as const)(
+    "preserves saved effort for explicit MCP GPT-6 Pro with strategy %s",
+    (browserModelStrategy) => {
+      const base = {
+        env: {},
+        runModel: "gpt-6-pro",
+        inputModel: "gpt-6-pro",
+        browserModelStrategy,
+      };
+
+      expect(buildConsultBrowserConfig({ ...base, userConfig: {} }).thinkingTime).toBeUndefined();
+      expect(
+        buildConsultBrowserConfig({
+          ...base,
+          userConfig: { browser: { thinkingTime: "standard" } },
+        }),
+      ).toMatchObject({ thinkingTime: "standard", modelStrategy: browserModelStrategy });
+    },
+  );
 
   test("lets configured effort override the current Pro alias default", () => {
     const config = buildConsultBrowserConfig({

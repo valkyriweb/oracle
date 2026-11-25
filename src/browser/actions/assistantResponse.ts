@@ -96,6 +96,7 @@ export interface TerminalSample {
   // Strong signals prove live work (stop/shimmer/aria-busy/status/progress). Weak activity is
   // limited to a heuristic sidecar match that can linger after completion.
   strongThinkingActive: boolean;
+  thinkingKnown: boolean;
 }
 
 export function createTerminalGateState(now: number): TerminalGateState {
@@ -117,10 +118,16 @@ export function classifyTurnTerminal(
   const changed = !state.seen || sample.contentKey !== state.lastKey;
   const lastChangeAt = changed ? sample.now : state.lastChangeAt;
   // proofA debounce: weak/stale sidecar evidence may be overridden, but strong live activity
-  // must reset the debounce. It also resets on ANY content change so a bar that appears while
-  // the answer is still rendering (the transient-bar / first-tokens race) cannot finalize.
+  // must reset the debounce. A failed thinking read is not idle, so it resets too. The
+  // debounce also resets on ANY content change so a bar that appears while the answer is
+  // still rendering (the transient-bar / first-tokens race) cannot finalize.
+  const thinkingKnown = sample.thinkingKnown;
   const barStableCycles =
-    sample.barVisible && !sample.stopVisible && !sample.strongThinkingActive && !changed
+    sample.barVisible &&
+    !sample.stopVisible &&
+    !sample.strongThinkingActive &&
+    thinkingKnown &&
+    !changed
       ? state.barStableCycles + 1
       : 0;
   const next: TerminalGateState = {
@@ -136,10 +143,11 @@ export function classifyTurnTerminal(
     // Debounced action bar AND content stable for a minimum time. The time-stability
     // requirement guards the documented race where finished-action controls surface while only
     // the first tokens have rendered. Weak sidecar evidence cannot hang a finished turn, but
-    // strong live activity vetoes this proof and restarts its debounce.
+    // strong live activity or a failed thinking read vetoes this proof and restarts its debounce.
     terminal =
       sample.barVisible &&
       !sample.strongThinkingActive &&
+      thinkingKnown &&
       barStableCycles >= config.barConfirmCycles &&
       stableMs >= config.minStableMs;
   }
@@ -228,9 +236,19 @@ export function isAnswerNowPlaceholderText(value: unknown): boolean {
   return sawGate && sawOwner;
 }
 
-export function isRetryAssistantUiErrorText(value: unknown, retryVisible: boolean): boolean {
-  if (!retryVisible || typeof value !== "string") return false;
+export function isAssistantTurnUiErrorText(value: unknown, retryVisible: boolean): boolean {
+  if (typeof value !== "string") return false;
   const text = value.toLowerCase().replace(/\s+/g, " ").trim();
+  // This terminal state can render without Retry. Restrict the rest to known UI chrome
+  // so ordinary answers discussing the error are still valid responses.
+  if (
+    /^thinking failed[.!]?(?:\s+retry)?(?:\s+is this conversation helpful so far\??(?:\s+yes\s+no)?)?$/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  if (!retryVisible) return false;
   return (
     text.includes("something went wrong") ||
     text.includes("failed to generate") ||
@@ -354,9 +372,12 @@ export async function waitForAssistantResponse(
         await terminateRuntimeExecution(Runtime);
         throw error;
       } else if (source === "evaluation") {
+        // The in-page observer already spent part of timeoutMs. Passing it
+        // again starts a second full wait.
+        const remainingMs = Math.max(0, timeoutMs - (Date.now() - start));
         const recovered = await recoverAssistantResponse(
           Runtime,
-          timeoutMs,
+          remainingMs,
           logger,
           minTurnIndex,
           expectedConversationId,
@@ -779,6 +800,7 @@ async function pollAssistantCompletion(
           stopVisible,
           barVisible,
           strongThinkingActive: thinkingActivity.strong,
+          thinkingKnown: thinkingActivity.known,
         },
         TERMINAL_GATE_CONFIG,
       );
@@ -1020,22 +1042,28 @@ function normalizeAssistantSnapshot(snapshot: AssistantSnapshot | null): {
 
 export function throwIfAssistantUiError(snapshot: AssistantSnapshot | null): void {
   if (snapshot?.uiError !== "temporary_unavailable") return;
-  throw new BrowserAutomationError(
-    "ChatGPT could not generate the submitted assistant turn and offered Retry.",
-    {
-      stage: "assistant-ui-error",
-      code: "chatgpt-ui-warning",
-      uiWarning: {
-        type: "temporary_unavailable",
-        message: "ChatGPT offered Retry for the submitted assistant turn.",
-        source: "assistant-turn",
-      },
+  throw new BrowserAutomationError("ChatGPT could not generate the submitted assistant turn.", {
+    stage: "assistant-ui-error",
+    code: "chatgpt-ui-warning",
+    uiWarning: {
+      type: "temporary_unavailable",
+      message: "ChatGPT reported a generation failure for the submitted assistant turn.",
+      source: "assistant-turn",
     },
-  );
+  });
 }
 
-function isGeneratedImageAssistantAnswer(answer: { html?: string } | null): boolean {
-  return Boolean(answer?.html?.includes("/backend-api/estuary/content?id=file_"));
+export function isGeneratedImageAssistantAnswer(
+  answer: { text?: string | null; html?: string | null } | null | undefined,
+): boolean {
+  // Only the extractor's synthesized label is an image-only answer. Other text
+  // can quote this file URL while the turn is still streaming.
+  const text = typeof answer?.text === "string" ? answer.text.trim() : "";
+  if (text !== "Generated image." && !/^Generated \d+ images\.$/.test(text)) {
+    return false;
+  }
+  const html = typeof answer?.html === "string" ? answer.html : "";
+  return html.includes("/backend-api/estuary/content?id=file_");
 }
 
 async function waitForCondition<T>(
@@ -1258,7 +1286,13 @@ function buildResponseObserverExpression(
     };
 
     const waitForSettle = async (snapshot) => {
-      if (String(snapshot?.html ?? '').includes('/backend-api/estuary/content?id=file_')) {
+      const imageOnlyText = String(snapshot?.text ?? '').trim();
+      const imageOnlyLabel =
+        imageOnlyText === 'Generated image.' || /^Generated \\d+ images\\.$/.test(imageOnlyText);
+      if (
+        imageOnlyLabel &&
+        String(snapshot?.html ?? '').includes('/backend-api/estuary/content?id=file_')
+      ) {
         return snapshot;
       }
       // Learned: short answers can be 1-2 tokens; enforce longer settle windows to avoid truncation.
@@ -1352,7 +1386,7 @@ function buildAssistantExtractor(functionName: string): string {
   return `const ${functionName} = () => {
     ${buildClickDispatcher()}
     ${buildThinkingActivityDetailsPredicateJs("readRetryThinkingActivity")}
-    const isRetryAssistantUiError = ${isRetryAssistantUiErrorText.toString()};
+    const isAssistantTurnUiError = ${isAssistantTurnUiErrorText.toString()};
     const ASSISTANT_SELECTOR = ${assistantLiteral};
     const isAssistantTurn = (node) => {
       if (!(node instanceof HTMLElement)) return false;
@@ -1437,7 +1471,7 @@ function buildAssistantExtractor(functionName: string): string {
         return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' &&
           !(style.opacity !== '' && Number(style.opacity) === 0);
       });
-      if (isRetryAssistantUiError(text, retryVisible) && !readRetryThinkingActivity().strong) {
+      if (isAssistantTurnUiError(text, retryVisible) && !readRetryThinkingActivity().strong) {
         return { text, html, messageId, turnId, turnIndex: index, uiError: 'temporary_unavailable' };
       }
       const imageOnlyChrome =

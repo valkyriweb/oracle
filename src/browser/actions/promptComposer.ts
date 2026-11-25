@@ -27,6 +27,7 @@ import { stageAttachmentPrompt } from "./attachmentPrompt.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
 import { buildAttachmentEvidenceExpression } from "./attachmentEvidence.js";
 import { buildAttachmentProgressExpression } from "./attachmentProgress.js";
+import { buildActiveComposerRootExpression } from "./composerRoot.js";
 import { buildInstallCompletionAnnouncementExpression } from "./completionAnnouncement.js";
 import { activateWebSearch } from "./webSearch.js";
 
@@ -56,6 +57,11 @@ export async function submitPrompt(
     runtime: ChromeClient["Runtime"];
     input: ChromeClient["Input"];
     page?: ChromeClient["Page"];
+    /**
+     * Bring the target to the front before trusted clicks (default). `false` skips this
+     * explicit activation and relies on the caller having enabled focus emulation.
+     */
+    activateBeforeTrustedInput?: boolean;
     attachmentNames?: AttachmentReadyInput[];
     attachmentNavigationUrl?: string;
     baselineTurns?: number | null;
@@ -349,7 +355,7 @@ export async function submitPrompt(
     logger,
     deps?.attachmentNames,
     deps?.attachmentTimeoutMs,
-    deps?.page,
+    deps?.activateBeforeTrustedInput === false ? undefined : deps?.page,
     deps?.attachmentNavigationUrl,
   );
   if (!clicked) {
@@ -535,7 +541,6 @@ function buildAttachmentReadyExpression(attachmentNames: AttachmentReadyInput[])
   const namesLiteral = JSON.stringify(attachmentExpectations);
   return `(() => {
     const expected = ${namesLiteral};
-    const sendSelectors = ${JSON.stringify(SEND_BUTTON_SELECTORS)};
     const normalize = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
     const matchesExpected = (value, item) => {
       const text = normalize(value);
@@ -592,38 +597,8 @@ function buildAttachmentReadyExpression(attachmentNames: AttachmentReadyInput[])
       // ChatGPT also renders uploaded tiles as a bare "Remove <filename>" button.
       'button[aria-label^="Remove "]',
     ];
-    const sendButton = sendSelectors
-      .map((selector) => document.querySelector(selector))
-      .find(Boolean);
-    const isUsableComposerRoot = (node) => {
-      if (!(node instanceof HTMLElement)) return false;
-      if (String(node.tagName || '').toLowerCase() === 'button') return false;
-      const testId = String(node.getAttribute?.('data-testid') || '').toLowerCase();
-      if (!testId.includes('composer')) return false;
-      return !(
-        testId.includes('footer') ||
-        testId.includes('action') ||
-        testId.includes('plus') ||
-        testId.includes('send')
-      );
-    };
-    const closestComposerRoot = (node) => {
-      let current = node instanceof HTMLElement ? node : null;
-      while (current) {
-        if (isUsableComposerRoot(current)) return current;
-        current = current.parentElement;
-      }
-      return null;
-    };
-    const firstComposerRoot = () =>
-      Array.from(document.querySelectorAll('[data-testid*="composer"]')).find(isUsableComposerRoot) || null;
-    const composer =
-      closestComposerRoot(sendButton) ||
-      sendButton?.closest?.('form') ||
-      firstComposerRoot() ||
-      document.querySelector('form') ||
-      document.body ||
-      document;
+    const composer = ${buildActiveComposerRootExpression()};
+    if (!composer) return false;
     // Walk node + ancestors (up to grandparent) + descendants to gather every textual hint.
     // ChatGPT's current chip DOM nests the filename inside truncated child spans, so checking
     // only the node's own textContent/aria/title misses the match.
@@ -900,11 +875,16 @@ async function activateExactAttachmentSendButton(
   const exactSendSelectors = [
     'button[data-testid="send-button"]',
     'form button[type="submit"][aria-label="Send"]',
+    'form button[type="submit"][aria-label="送信"]',
   ];
+  const findButton = `() => {
+    const root = ${buildActiveComposerRootExpression()};
+    return root ? ${JSON.stringify(exactSendSelectors)}.map(selector => root.querySelector(selector)).find(Boolean) : null;
+  }`;
   const probe = await Runtime.evaluate({
     expression: `(() => {
-      const selectors = ${JSON.stringify(exactSendSelectors)};
-      const button = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
+      const findButton = ${findButton};
+      const button = findButton();
       if (!(button instanceof HTMLElement)) return { status: 'absent' };
       const rect = button.getBoundingClientRect();
       const style = window.getComputedStyle(button);
@@ -947,7 +927,8 @@ async function activateExactAttachmentSendButton(
     const boundary = await Runtime.evaluate({
       expression: `(() => {
         const selectors = ${JSON.stringify(exactSendSelectors)};
-        const button = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
+        const findButton = ${findButton};
+        const button = findButton();
         const check = () => {
           const navigation = ${buildComposerNavigationValidationExpression(attachmentNavigationUrl)};
           const rect = button?.getBoundingClientRect();
@@ -955,7 +936,7 @@ async function activateExactAttachmentSendButton(
           return {
             ...navigation,
             focused: button instanceof HTMLElement && document.activeElement === button &&
-              selectors.map((selector) => document.querySelector(selector)).find(Boolean) === button &&
+              findButton() === button &&
               !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
               button.getAttribute('data-disabled') !== 'true' && rect.width > 0 && rect.height > 0 &&
               style.display !== 'none' && style.visibility !== 'hidden' && style.pointerEvents !== 'none',

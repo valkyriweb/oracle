@@ -14,9 +14,12 @@ Read this file whenever you're working from Windows and add new findings so the 
 
 Future Windows gotchas belong here. Update this doc when you learn something new.
 
+- Chinese ChatGPT can announce `回答已完成` and place localized copy controls outside the search unit inside a `data-talvt-turn-state` wrapper. Completion and Markdown capture must scope those controls to the current assistant exchange. Keep user-message and code-block exclusions in the shared selector too: Deep Research queries it directly without the ordinary turn-action locator's guards.
+
 - Run focused Vitest suites with `node node_modules/vitest/vitest.mjs run ...` if the package-manager command cannot resolve the Windows executable shim in an automation environment.
 
 - Tab-lease tests run real PowerShell process-identity probes (up to five seconds each). Their Windows test budget must cover multiple probes and registry cleanup. Failed self-identity probes are retried on the next lookup; only a successful identity is cached for the controller lifetime.
+- Final shared Chrome cleanup retries an unavailable process-command query once. A failed CIM read is not a verified profile mismatch; an actual mismatch or two unavailable reads still leave the process untouched.
 
 - Detached-worker proofs must wait for the worker PID to exit before deleting its temporary working directory. Sending SIGTERM alone races Windows handle release and can fail cleanup with EBUSY; use a bounded exit wait and bounded filesystem retries without skipping the lifecycle assertions.
 
